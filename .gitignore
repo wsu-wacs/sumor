@@ -40,3 +40,4 @@ vignettes/*.pdf
 **/tmp_*
 **/tmp*
 *.xml
+.Rproj.user

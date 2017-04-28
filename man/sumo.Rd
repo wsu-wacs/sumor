@@ -6,6 +6,6 @@
 \title{SUMO reference class object}
 \description{
 Reference class implementation that enables easy use of SUMO functionality
-that maintain consistent states
+through the maintaining of consistent reference class states. Suitable for simulation.
 }
 
