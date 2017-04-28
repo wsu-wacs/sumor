@@ -1,0 +1,821 @@
+---
+title: "Simulating Road traffic is SUMO and OSM"
+author: "Matthew Piekenbrock"
+output: html_notebook
+---
+
+```{r}
+  ## Load library, set SUMO home path 
+  suppressMessages({ library("sumor", quietly = T) })
+  Sys.setenv(SUMO_HOME="/opt/local/share/sumo")
+  
+  ## Create temporary directory to store all the intermediate data files (optional)
+  if (!dir.exists("./tmp")){ dir.create("./tmp") }
+  Sys.setenv(SUMO_TMP=paste0(getwd(),"/tmp/"))
+  
+  ## Import or make a sumo(R) object 
+  osu_net <- if ("osu_net" %in% ls()) sumor::sumo$new()$import(osu_net) else sumor::sumo$new() 
+  
+  ## Get OSM Map by bounding box (Selected from http://boundingbox.klokantech.com)
+  osu_bbox <- sp::bbox(matrix(c(-83.024733,39.995205,-83.006923,40.005429), ncol=2, byrow = T)) 
+  osu_net$getOSM(osu_bbox, file = "osu.osm", overwrite = F)
+  
+  ## Convert the source representation to a SUMO road network 
+  osu_net$netconvert(urban = T, pedestrian = T, polygons = T, flags = "--sidewalks.guess --seed 23423 --crossings.guess TRUE") #--junctions.join
+  
+  ## Generating trips and routes (s seconds * m minutes * h hours)
+  osu_net$randomTrips(start = 0, end = 60 * 60 * 6, p = 2, n = 1, person = F) # --persontrips
+```
+
+## Viewing the simulation 
+```{r}
+  osu_net$viewSimulation("--step-length 0.5")
+```
+
+## Visualizing the geospace
+```{r}
+suppressMessages({ library("leaflet", quietly = T) })
+
+## Plotting the junctions via leaflet 
+arcgis_template <- "http://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+# osm_template <- "http://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+m <- leaflet() %>% 
+  setView(lng = apply(osu_net$config$bbox, 1, mean)[[1]], lat = apply(osu_net$config$bbox, 1, mean)[[2]], zoom = 16) %>% 
+  addTiles(urlTemplate=arcgis_template) 
+```
+
+## Getting 'stay points' where cars stopped moving
+```{r, messages=FALSE}
+suppressMessages({ library("data.table", quietly = T) })
+brake_pts_list <- list()
+
+## Process simulation data in batch mode
+one_hour <- 60 * 60
+increment <- (one_hour / 4)
+start <- seq(0, (one_hour * 6) - increment, by = increment)
+end <- seq(increment, one_hour * 6, by = increment) - 1
+sim_intervals <- data.table::data.table(start=start, end=end)
+
+## Generate data in one hour intervals 
+for (i in 1:nrow(sim_intervals)){
+  ## Running the simulation generated with randomTrips (0.01 == 10ms intervals)
+  osu_net$genConfig(begin = sim_intervals[i]$start, end = sim_intervals[i]$end)
+  osu_net$simulate(flags = "--step-length 0.5 --fcd-output tmp_fcd.xml --fcd-output.signals") # --amitran-output tmp_traj.xml
+
+  ## Extract the 'stay points' of each vehicle a.k.a when the vehicle is braking, by both vehicle id and lane
+  veh_states <- osu_net$vehicleStates("tmp_fcd.xml")
+
+  # Use { which.min(.SD[["speed"]]) } to agggregate and get slowest points 
+  brake_pts_list[[i]] <- veh_states[signals >= 8][order(as.numeric(timestep)), 
+                                             .SD[which.min(.SD[["speed"]]), .(x=as.numeric(x), y=as.numeric(y))], by=.(id, lane)]
+}
+
+## Combine into one data.table (every 4 increments == 1 hour)
+brake_pts <- data.table::rbindlist(brake_pts_list[1])
+
+## Extract WSG84 coordinates from points; get random sample to reduce plotting time
+stay_pts <- osu_net$projectCRS(as.matrix(brake_pts[, .(as.numeric(x), as.numeric(y))]))@coords
+
+## Visualize samples using leaflet
+#what <- matrix(c(721.75,1546.78, 725.74,1546.46, 725.57,1543.47, 716.07,1543.98, 716.23,1546.98), ncol=2, byrow = T)
+#m %>% addCircles(lng = stay_pts_smpl[,1], lat = stay_pts_smpl[,2], radius = 1, color = "red")
+#m %>% addPolygons(lng = osu_net$projectCRS(what)@coords[, 1], lat = osu_net$projectCRS(what)@coords[, 2])
+```
+
+# Creating truth labels
+### Extracting junction data 
+```{r}
+## Function to turn junction xy into lat long coordinates 
+junc_to_lnglat <- function(junctions, sumor_net){
+  juncs <- data.table::rbindlist(lapply(junctions, function(junc) junc[c("x", "y")]))
+  juncs <- juncs[, lapply(.SD, as.numeric)]
+  sumor_net$projectCRS(as.matrix(juncs))@coords
+}
+
+## Getting the junction data (filter out internal junctions)
+osu_junctions <- osu_net$getJunctions()
+pj <- Filter(function(junc) junc$type != "internal", osu_junctions)
+
+## Get plain junction (x,y) SUMO coordinates 
+pj_xy <- data.table::rbindlist(lapply(pj, function(junc) junc[c("x", "y")]))[, lapply(.SD, as.numeric)]
+
+## Parse through the junctions, getting all of the incoming and internal roads
+edge_regex <- "[:-]?([[:digit:]]+)(?:[_#][[:digit:]]*)*"
+inc_roads <- lapply(pj, function(junc) sub(unlist(strsplit(junc[["incLanes"]], " ")), pattern = edge_regex, replacement = "\\1"))
+int_roads <- lapply(pj, function(junc) sub(unlist(strsplit(junc[["intLanes"]], " ")), pattern = edge_regex, replacement = "\\1"))
+                    
+## For each junction, assign a cluster ID to the roads it's connected it
+road_ids <- unique(c(unlist(inc_roads), unlist(int_roads)))
+road_map <- structure(vector(mode = "list", length = length(road_ids)), names=road_ids)
+for (i in 1:length(pj)){
+  for (road_id in c(inc_roads[[i]], int_roads[[i]])){ 
+    road_map[[road_id]] <- unique(c(road_map[[road_id]], i))
+  }
+}
+```
+### Creating truth labels 
+```{r}
+## Parse brake point lanes into roads 
+brake_pt_roads <- sub(brake_pts$lane, pattern = edge_regex, replacement = "\\1")
+
+## Make sure every brake point has a road associated with it
+all(brake_pt_roads %in% names(road_map)) # [1] TRUE
+
+## Get the `true' cluster assignments by junction. In case a road is associated with multiple junctions, 
+## assign the brake point to the nearest junction connected to the road its on (takes awhile)
+true_cl <- sapply(1:nrow(brake_pts), function(i) {
+  cl_id <- road_map[[brake_pt_roads[i]]]
+  ifelse(length(cl_id) > 1, 
+    cl_id[class::knn1(pj_xy[cl_id], brake_pts[i, .(x, y)], seq(nrow(pj_xy[cl_id])))],
+    cl_id)
+})
+```
+
+Visualizing the truth data
+```{r}
+suppressMessages({ library("leaflet", quietly = T) })
+## Get plain, internal, and trafficked (plain) junction WSG84 coordinates
+pj_pts <- junc_to_lnglat(pj, osu_net)
+
+## Extract WSG84 coordinates from points; get random sample to reduce plotting time
+stay_pts <- osu_net$projectCRS(as.matrix(brake_pts[, .(as.numeric(x), as.numeric(y))]))@coords
+
+## Visualize the colors on the map (with color redundancy)
+## Note: uncomment first circles command to see SUMO junctions
+palette("default")
+m %>% 
+  addCircles(lng = pj_pts[unique(true_cl),1], lat=pj_pts[unique(true_cl),2], radius = 4, color = "orange") %>%
+  addCircles(lng = stay_pts[,1], lat = stay_pts[,2], radius = 1, 
+             color = palette()[(true_cl %% length(palette()))+1L])
+```
+
+
+## Saving the data 
+```{r}
+## Save off simulation data for loading in later 
+sumo_truth <- list(cluster=true_cl, sp=stay_pts)
+save(sumo_truth, file = paste0(getwd(), "/sumo_truth.rdata"))
+```
+
+
+### crazy attempts 
+```{r}
+edge_data <- osu_net$getEdges()
+edge_shapes <- edge_data[!is.na(shape)]$shape
+edge_coords <- lapply(edge_shapes, function(e_shape) do.call(rbind, lapply(strsplit(unlist(strsplit(e_shape, split = " ")), ","),  as.numeric)))
+edge_lnglat <- lapply(edge_coords, function(xy) osu_net$projectCRS(xy)@coords)
+
+shape_dt <- data.table::rbindlist(lapply(edge_lnglat, as.data.frame), idcol = "shape_id")
+
+for (e_ll in edge_lnglat){
+  m <- m %>% addPolygons(m, lng = e_ll[, 1], lat = e_ll[, 2], color = sample(palette(), size = 1))
+}
+```
+
+
+## Plotting the truth data 
+
+## Validating 
+
+Validation measures used 
+```{r validate_function, cache=TRUE, include=FALSE}
+validate <- function(test_cl, truth_cl){
+  return(list(
+    VI = 1 - (mcclust::vi.dist(test_cl, truth_cl) / log(length(test_cl), base = 2)),
+    FM = clues::adjustedRand(test_cl, truth_cl, randMethod = "FM"), 
+    ARI = flexclust::randIndex(test_cl, truth_cl)
+  ))
+} 
+```
+
+Compute validation measures 
+```{r, dependson=c('validate_function'), cache=TRUE}
+library("mjp.algorithms")
+dist_sp <- dist(sumo_truth$sp, method = "euclidean")
+k_values <- seq(5, 300, by = 5)
+
+## Using the cluster tree 
+rsl_trees <- lapply(k_values, function(k) mjp.algorithms::clustertree(dist_sp, k=k, alpha = sqrt(2)))
+rsl <- mapply(function(tree, k) dbscan::extractFOSC(tree, minPts = k), rsl_trees, k_values, SIMPLIFY = F)
+rsl_ari <- t(sapply(rsl, function(rsl_cl) validate(rsl_cl$cluster[rsl_cl$cluster != 0], sumo_truth$cluster[rsl_cl$cluster != 0])))
+rsl_ari <- apply(rsl_ari, 2, unlist)
+# plot_cl(rsl[[30]], sumo_truth$sp)
+
+## Using HDBSCAN*
+hdb <- lapply(k_values, function(k) dbscan::hdbscan(sumo_truth$sp, minPts = k, xdist = dist_sp))
+hdb_ari <- t(sapply(hdb, function(hdb_cl) validate(hdb_cl$cluster[hdb_cl$cluster != 0], sumo_truth$cluster[hdb_cl$cluster != 0])))
+hdb_ari <- apply(hdb_ari, 2, unlist)
+# plot_cl(hdb[[1]]$cluster, sp = sumo_truth$sp)
+
+## Using K-means 
+km <- lapply(k_values, function(k) kmeans(sumo_truth$sp, centers = k)$cluster)
+km_ari <- t(sapply(km, function(km_cl) validate(km_cl, sumo_truth$cluster)))
+km_ari <- apply(km_ari, 2, unlist)
+
+## Single Linkage 
+sl <- hclust(dist_sp, method = "single")
+sl_cl <- lapply(k_values, function(k) cutree(sl, k = k))
+sl_ari <- t(sapply(sl_cl, function(sl_cl) validate(sl_cl, sumo_truth$cluster)))
+sl_ari <- apply(sl_ari, 2, unlist)
+
+## Average Linkage 
+al <- hclust(dist_sp, method = "average")
+al_cl <- lapply(k_values, function(k) cutree(sl, k = k))
+al_ari <- t(sapply(al_cl, function(al_cl) validate(al_cl, sumo_truth$cluster)))
+al_ari <- apply(al_ari, 2, unlist)
+
+## Wards Linkage 
+wl <- hclust(dist_sp, method = "ward.D2")
+wl_cl <- lapply(k_values, function(k) cutree(wl, k = k))
+wl_ari <- t(sapply(wl_cl, function(wl_cl) validate(wl_cl, sumo_truth$cluster)))
+wl_ari <- apply(wl_ari, 2, unlist)
+
+## Clara
+cl_cl <- lapply(k_values, function(k) cluster::clara(sumo_truth$sp, k = k))
+cl_ari <- t(sapply(cl_cl, function(cl_cl) validate(cl_cl$clustering, sumo_truth$cluster)))
+cl_ari <- apply(cl_ari, 2, unlist)
+
+## Results 
+{ prev.par <- par(no.readonly = TRUE); par(mfrow = c(1, 3)); palette(sample(viridis::viridis(7))) }
+for (i in 1:3)
+  boxplot(rsl_ari[, i], hdb_ari[, i], km_ari[, i], sl_ari[, i], al_ari[, i], wl_ari[, i], cl_ari[, i], 
+          border = palette(), main = colnames(rsl_ari)[i], lwd=2)
+par(prev.par)
+```
+
+# Miscellaneous stuff for the future 
+
+```{r}
+noiseToSingletons <- function(cl) { cl[cl == 0] <- seq(max(cl), max(cl) + sum(cl == 0) - 1); cl } 
+ss_cl <- vector("integer", length = nrow(brake_pts))
+pos_links <- brake_pt_constraints[["83"]][which(brake_pt_constraints[["83"]] > 0)]
+neg_links <- brake_pt_constraints[["83"]][which(brake_pt_constraints[["83"]] < 0)]
+ss_cl[pos_links] <- 1
+ss_cl[neg_links] <- 0
+plot_cl(ss_cl, sumo_truth$sp)
+
+## Semi-supervised version
+getShape <- function(shape) do.call(rbind, lapply(strsplit(unlist(strsplit(shape, split = " ")), split = ","), as.numeric))
+junc_shapes <- lapply(pj, function(junc) getShape(junc$shape))
+brake_pt_constraints <- lapply(1:length(pj), function(pj_i) {
+  pos_constraints <- which(sp::point.in.polygon(brake_pts$x, brake_pts$y, pol.x = junc_shapes[[pj_i]][, 1], pol.y = junc_shapes[[pj_i]][, 2]) == 1)
+  pos_constraints
+  #neg_constraints <- -seq(nrow(brake_pts))[-pos_constraints]
+  #c(pos_constraints, neg_constraints)
+})
+brake_pt_labels <- as.character(sapply(brake_pt_constraints[which(sapply(brake_pt_constraints, length) > 1)], head, n=1))
+brake_pt_constraints <- lapply(brake_pt_constraints[which(sapply(brake_pt_constraints, length) > 1)], function(pc) pc[-1])
+names(brake_pt_constraints) <- brake_pt_labels
+bp_cons <- lapply(brake_pt_labels, function(label){
+  c(brake_pt_constraints[[label]], -as.vector(unlist(brake_pt_constraints[names(brake_pt_constraints) != label])))
+})
+names(bp_cons)  <- brake_pt_labels
+
+
+rsl_ss <- mapply(function(tree, k) dbscan::extractFOSC(tree, minPts = k, constraints = bp_cons),
+              rsl_trees, seq(length(k_values))+1, SIMPLIFY = F)
+rsl_ss_ari <- sapply(rsl_ss, function(rsl_cl) flexclust::randIndex(x = rsl_cl$cluster[rsl_cl$cluster != 0], 
+                                                                   y = sumo_truth$cluster[rsl_cl$cluster != 0]))
+
+
+         
+```
+
+## Getting vehicle positions
+```{r}
+veh_states <- osu_net$vehicleStates("tmp_fcd.xml")
+braking_clusters <- function(veh_states, partition=T){
+  res <- new.env(parent = emptyenv())
+  for (cid in unique(veh_states$id)){
+    ## Debugging
+    print(cid)
+    
+    ## get the current vehicle's signals and speed
+    vehicle <- veh_states[id==cid][order(as.numeric(timestep))]
+    vehicle$speed <- as.numeric(vehicle$speed)
+    vehicle_signals <- as.integer(vehicle$signals)
+    
+    ## Any signal >= 8 indicates using the brakelight, so capture only those
+    slow_signals <- ifelse(vehicle_signals >= 8, 1, 0)
+    slow_rle <- rle(slow_signals)
+    
+    ## Get the braking periods 
+    braking_seq <- unlist(mapply(function(len, val, i) {
+      if(val > 0) rep(i, len) 
+      else rep(ifelse(partition, i, 0), len)
+    }, slow_rle$lengths, slow_rle$values, seq(length(slow_rle$lengths))))
+    
+    ## Retrieve the last indices representing a contiguous braking sequence
+    braking_seq <- unname(matrix(as.vector(braking_seq), ncol=1))
+    braking_seq <- data.table::data.table(braking_seq)
+    colnames(braking_seq) <- "BS" 
+    
+    ## Car never braked
+    if (all(braking_seq == 0)){
+      res[[as.character(cid)]] <- list(cluster = NULL, starts = NULL, ends = NULL, mids = NULL, change = NULL)
+      next;
+    }
+    
+    ## Find last indices that don't match previous index
+    transition_pts <- braking_seq[BS != shift(BS, type = "lead"), which = T]
+    
+    ## Get the starting points for each 'true' segment
+    starts <- transition_pts[seq(length(transition_pts)) %% 2 != 0]
+    
+    ## Store the midpoints as the 'true' stopping points
+    midpoints <- transition_pts[seq(length(transition_pts)) %% 2 == 0]
+    
+    ## The last start never finished, discard last segment 
+    if (length(midpoints) < length(starts)){
+      starts <- starts[1:(length(starts) - 1)]
+    }
+    
+    ## Never include first segment 
+    starts <- starts[-1]
+    midpoints <- midpoints[-1]
+    
+    ## Only use trajectories with more than 1 segment
+    max_t <- min(c(length(starts), length(midpoints)))
+                 
+    # ## Since it's not always known when the last segment ends (could be an active segment), 
+    # ## only record the first n - 1 braking segments 
+    # starts <- starts[1:max_t]
+    # midpoints <- midpoints[1:max_t]
+    # 
+    ## No valid segmentation found
+    if (max_t <= 1 || any(c(is.null(starts), is.null(midpoints)))){
+      res[[as.character(cid)]] <- list(cluster = NULL, starts = NULL, ends = NULL, mids = NULL, change = NULL)
+      next
+    }
+    
+    ## Finds the earliest point where the vehicle's speed stopped accelerating 
+    ends <- mapply(function(i, j) { head(which(vehicle$speed[i:j] - shift(vehicle$speed[i:j], type = "lead", fill = 0) > 0), 1) + i }, 
+                   midpoints, c(starts[-1], length(vehicle$speed)))
+    
+    ## Ensure all segments have starts, mids, and endpoints
+    if (!all.equal(length(starts), length(midpoints), length(ends))){ stop(paste0(cid, ": malformed s->m->e sequence")) } 
+    # n_segments <- min(c(length(starts), length(midpoints), length(ends)))
+    # starts <- starts[1:n_segments]
+    # midpoints <- midpoints[1:n_segments]
+    # ends <- ends[1:n_segments]
+    # 
+    # ## Check valleys are all valid start --> mid --> end
+    # check <- all(mapply(function(s, m, e) (s <= m) && (m <= e), starts, midpoints, ends) == T)
+    # if (!check){ stop(paste0(cid, ": malformed s->m->e sequence")) }
+    
+    ## Sort and return maximum detectable range of states 
+    total_n <- nrow(braking_seq)
+    change_pts <- data.table::data.table(s=starts, e=ends)
+    change_pts_f <- data.table::data.table(s=1/total_n, e=(starts[1]-1)/total_n, cl=1)
+    c_i <- 2
+    for (i in seq(nrow(change_pts))){
+      change_pts_f <- rbind(change_pts_f, list(s = change_pts[i]$s/total_n, e = (change_pts[i]$e - 1)/total_n, cl = c_i))
+      if (i != nrow(change_pts) && change_pts[i]$e != change_pts[i+1]$s){
+        if (partition){ c_i <- c_i + 1 }
+        change_pts_f <- rbind(change_pts_f, list(s = change_pts[i]$e/total_n, e = (change_pts[i+1]$s - 1)/total_n, cl = ifelse(partition, c_i, 0)))
+      }
+      c_i <- c_i + 1
+    }
+  
+    ## Save results  
+    res[[as.character(cid)]] <- list(starts = starts, 
+                                     ends = ends, 
+                                     mids = midpoints, 
+                                     change = change_pts_f)
+  }
+  return(as.list(res))
+}
+
+truth <- braking_clusters(veh_states, partition = T)
+truth_noise <- braking_clusters(veh_states, partition = F)
+#save(truth, file = "~/WaCS/reporting/SIGSPATIAL17 - Trajectory Segmentation/R/truth.rdata")
+```
+
+## Helper Functions 
+Functions to help validate vehicle segments using different sampling rates 
+```{r}
+## Given an integer and the truth listing of a trajectory, create a 'clustering' with the interpolated truth values
+extractClusters <- function(n, tr){
+  actual_n <- 
+  res <- rep(0, n)
+  for (i in 1:nrow(tr$change)){ res[as.integer(tr$change[i]$s*n) : as.integer(tr$change[i]$e*n)] <- tr$change[i]$cl }
+  res
+}
+
+## Plot the speed of a vehicle
+plotSpeed <- function(vehicle, truth_changes){
+  plot(as.numeric(vehicle[order(as.numeric(timestep))]$speed), type="l")
+  n <- nrow(vehicle)
+  cl_ids <- unique(truth_changes$change$cl)
+  cl_ids <- cl_ids[cl_ids != 0]
+  cl_colors <- rainbow(length(cl_ids))
+  for (i in 1:nrow(truth_changes$change)){
+    cid <- truth_changes$change[i]$cl
+    abline(v=truth_changes$change[i]$s*n, col=ifelse(cid == 0, "black", cl_colors[cid]))
+    #abline(v=truth_changes$change[i]$e*n, col=ifelse(cid == 0, "black", cl_colors[cid]))
+  }
+}
+
+
+reload_pkg <- function(pkg_name){
+  #if (paste0("package:", pkg_name) %in% search()) detach(paste0("package:", pkg_name))
+  unloadNamespace(paste0("package:", pkg_name))
+  library(pkg_name, character.only = T)
+  #devtools::load_all(pkg = "mjp.algorithms")
+  # save.image("~/WaCS/spatnet/workspace.RData")
+  # load("~/WaCS/spatnet/workspace.RData")
+}
+
+clean_samples <- function(x){
+  x$timestep <- as.numeric(x$timestep)
+  x$id <- as.integer(x$id)
+  x$pos <- as.numeric(x$pos)
+  x$x <- as.numeric(x$x) 
+  x$y <- as.numeric(x$y)
+  x$lat <- as.numeric(x$lat)
+  x$lon <- as.numeric(x$lon)
+  x$speed <- as.numeric(x$speed)
+  x <- x[order(timestep)]
+  x
+}
+```
+
+
+## Validating different sampling rates
+```{r}
+## Getting vehicle routes at different sampling rates 
+sample0 <- veh_states[, .(timestep, id, lane, pos, x, y, speed)]
+sample0 <- cbind(sample0, osu_net$projectCRS(as.matrix(apply(veh_states[, .(x, y)], 2, as.numeric)))@coords)
+colnames(sample0)[(ncol(sample0)-1):ncol(sample0)] <- c("lon", "lat")
+sample1 <- osu_net$vehicleProbe(probe = list(id = "probe1", type = "DEFAULT_VEHTYPE", freq = "3"))
+sample2 <- osu_net$vehicleProbe(probe = list(id = "probe1", type = "DEFAULT_VEHTYPE", freq = "1"))
+sample3 <- osu_net$vehicleProbe(probe = list(id = "probe1", type = "DEFAULT_VEHTYPE", freq = "0.5"))
+sample4 <- osu_net$vehicleProbe(probe = list(id = "probe1", type = "DEFAULT_VEHTYPE", freq = "0.25")) # 
+sample5 <- osu_net$vehicleProbe(probe = list(id = "probe1", type = "DEFAULT_VEHTYPE", freq = "0.1")) # 0.1 == 100 ms intervals (5 sec == 50)
+sample_data <- list(sample1, sample2, sample3, sample4, sample5, sample0)
+sample_data <- lapply(sample_data, clean_samples)
+sample_params <- c(2L, 5L, 10L, 20L, 50L, 500L)
+
+## Write output to act as input for other algorithms
+dbWriteTable(con, name = 'sample1', value = sample_data[[1]][, .(id, timestep, lat, lon)], row.names=FALSE)
+
+## Validate vehicle 
+for (i in 1:length(sample_data)){
+  cat(paste0("Sample ", i, ": "))
+  for (cid in ls(truth)) {
+    current_sample <- sample_data[[i]][id==cid][order(as.numeric(timestep)), .(id=as.integer(id), 
+                                                                               timestep=as.numeric(timestep), 
+                                                                               x=as.numeric(x), 
+                                                                               y=as.numeric(y))]
+    # latlong <- osu_net$projectCRS(as.matrix(current_sample[, .(x, y)]))@coords
+    # current_sample[, 3:ncol(current_sample) := as.data.table(latlong)]
+    if (nrow(current_sample) > 0){
+      ## Get current trajectory
+      trajectory <- cbind(current_sample[, .(id, timestep)], osu_net$projectCRS(as.matrix(current_sample[, .(x, y)]))@coords)
+      n <- nrow(trajectory)
+      truth_interval <- truth[[as.character(cid)]]
+      
+      ## It's possible the vehicle never stopped
+      if (all(sapply(truth_interval, is.null))){ next } 
+      s <- as.integer(truth_interval$change[1]$s*n)
+      e <- as.integer(truth_interval$change[nrow(truth_interval$change)]$e*n)
+      
+      ## Compute rand index of valid trajectory intervals
+      traj_truth <- extractClusters(n = n, tr = truth_interval)[s:e]
+      traj_sample <- trajectory[s:e]
+      if (nrow(traj_sample) > 2 * sample_params[i]){
+        traj_fosc <- stfosc(traj_sample, m = sample_params[i])
+        ## plot(as.hclust(rev(as.dendrogram(traj_fosc$hier))))
+        ## plot(rev(as.dendrogram(traj_fosc$hier, hang = 0.1)))
+        ## plot(as.numeric(sample_data[[i]][id==cid][order(as.numeric(timestep))]$speed), type="l")
+        ## plot(dendextend::branches_color(rev(as.dendrogram(traj_fosc$hier, hang = 0.1)), clusters = traj_fosc$cluster[traj_fosc$hier$order]))
+        cat(flexclust::randIndex(traj_truth, traj_fosc$cluster, correct = F))
+        cat(",")
+      }
+    }
+  }
+  print("")
+}
+## plot(trajectory[, 3:4], col=extractClusters(n = nrow(trajectory), tr = truth[[as.character(cid)]])+1)
+```
+
+```{r}
+# load("sumo_truth.rdata")
+plot_cl <- function(cl, sp){
+  suppressMessages({ library("leaflet", quietly = T) })
+  i <- !duplicated(sp)
+  m %>% 
+  addCircles(lng = tj_pts[,1], lat=tj_pts[,2], radius = 4, color = "orange") %>%
+  addCircles(lng = sp[i, 1], lat=sp[i, 2], radius = 1, color = palette()[(as.integer(cl[i]) %% length(palette()))+1L])
+}
+plot_cl(sumo_truth$cluster, sumo_truth$sp)
+```
+
+```{r}
+# veh_states[id==3]
+#                             [order(as.numeric(timestep)), .(id=as.integer(id), timestep=as.numeric(timestep), x=as.numeric(x), y=as.numeric(y))], 
+#                             
+# ## Get true vehicle
+# cid <- 24
+# true_vehicle <- truth[[as.character(cid)]]
+# n <- length(true_vehicle$cluster)
+# 
+# ## Testing a vehicle
+# veh_info <- veh_states[id==cid][order(as.numeric(timestep))]
+# veh_xy <- apply(as.matrix(veh_info[, .(x, y)]), 2, as.numeric)
+# veh_latlong <- osu_net$projectCRS(veh_xy)@coords
+# test_vehicle <- cbind(veh_info$id, as.numeric(veh_info$timestep), veh_latlong)
+# test_vehicle <- apply(test_vehicle, 2, as.numeric)[1:n,]
+# 
+# ## Save test vehicle data 
+# test_traj <- list(data=test_vehicle, truth=true_vehicle)
+# save(test_traj, file = "~/WaCS/reporting/SIGSPATIAL17 - Trajectory Segmentation/R/test_traj.rdata")
+# 
+# load("~/WaCS/reporting/SIGSPATIAL17 - Trajectory Segmentation/R/test_traj.rdata")
+# 
+# 
+# 
+# max_step <- max(truth[["3"]]$ends)/nrow(veh_states[id==3])
+# veh_info <- veh_states[id==3][order(as.numeric(timestep))] # speed in m/s 
+# veh_motion <- osu_net$vehicleAcc("tmp_traj.xml") ## speed in 0.01m/s, accel in 0.001m/s^2
+# 
+# plot(as.numeric(veh_info$speed)[1:max_step], type="l", col="red")
+# plot((as.numeric(veh_motion[vehicle==2][order(as.integer(time))]$acceleration)/1000)[1:max_step], type="l", col="blue")
+# lines(as.numeric(veh_info$speed)[1:max_step], type="l", col="red")
+# 
+# pts <- sp::SpatialPoints(as.matrix(veh_info[, .(as.numeric(x), as.numeric(y))]), proj4string = osu_net$config$CRS)
+# plot(sp::spTransform(pts, sp::CRS("+proj=longlat +ellps=WGS84"))@coords[1:max_step,])
+# 
+# plotSpeed(sample1[id==3], truth[["3"]])
+# plotSpeed(sample2[id==3], truth[["3"]])
+# plotSpeed(sample3[id==3], truth[["3"]])
+# plotSpeed(sample4[id==3], truth[["3"]])
+# plotSpeed(sample5[id==3], truth[["3"]])
+# plotSpeed(sample6[id==3], truth[["3"]])
+# plotSpeed(veh_states[id==3], truth[["3"]])
+# 
+# 
+# 
+# ## Validation testing
+# for (cid in sort(unique(veh_states$id))){
+#   test_data <- veh_states[id==cid][order(as.numeric(timestep)), .(id=as.integer(id), timestep=as.numeric(timestep), x=as.numeric(x), y=as.numeric(y))]
+# }
+# 
+# 
+# cl0 <- spatnet::stay_points(minPts = 500)
+# 
+# cl1 <- spatnet::stay_points(sample1[id==3]
+#                             [order(as.numeric(timestep)), .(id=as.integer(id), timestep=as.numeric(timestep), x=as.numeric(x), y=as.numeric(y))], 
+#                             minPts = 2)
+# cl2 <- spatnet::stay_points(sample2[id==3]
+#                             [order(as.numeric(timestep)), .(id=as.integer(id), timestep=as.numeric(timestep), x=as.numeric(x), y=as.numeric(y))], 
+#                             minPts = 5)
+# cl3 <- spatnet::stay_points(sample3[id==3]
+#                             [order(as.numeric(timestep)), .(id=as.integer(id), timestep=as.numeric(timestep), x=as.numeric(x), y=as.numeric(y))], 
+#                             minPts = 10)
+# cl4 <- spatnet::stay_points(sample4[id==3]
+#                             [order(as.numeric(timestep)), .(id=as.integer(id), timestep=as.numeric(timestep), x=as.numeric(x), y=as.numeric(y))], 
+#                             minPts = 20)
+# cl5 <- spatnet::stay_points(sample5[id==3]
+#                             [order(as.numeric(timestep)), .(id=as.integer(id), timestep=as.numeric(timestep), x=as.numeric(x), y=as.numeric(y))], 
+#                             minPts = 50)
+# plot(res$hc, labels=F)
+# flexclust::randIndex(cl0$cluster, truth[["3"]]$cluster, correct = F)
+# flexclust::randIndex(cl1$cluster, extractClusters(length(cl1$cluster), truth[["3"]]), correct = F)
+# flexclust::randIndex(cl2$cluster, extractClusters(length(cl2$cluster), truth[["3"]]), correct = F)
+# flexclust::randIndex(cl3$cluster, extractClusters(length(cl3$cluster), truth[["3"]]), correct = F)
+# flexclust::randIndex(cl4$cluster, extractClusters(length(cl4$cluster), truth[["3"]]), correct = F)
+# flexclust::randIndex(cl5$cluster, extractClusters(length(cl5$cluster), truth[["3"]]), correct = F)
+# mclust::adjustedRandIndex(cl1$cluster[cl1$hc$order], extractClusters(length(cl1$cluster), truth[["3"]]))
+# 
+# 
+# 
+# sapply(2:30, function(minPts){
+#   cl1 <- spatnet::stay_points(sample1[id==3]
+#                             [order(as.numeric(timestep)), .(id=as.integer(id), timestep=as.numeric(timestep), x=as.numeric(x), y=as.numeric(y))], 
+#                             minPts = minPts)
+#   mclust::adjustedRandIndex(cl1$cluster[cl1$hc$order], extractClusters(length(cl1$cluster), truth[["3"]]))
+# })
+# 
+# 
+# plot(as.numeric(veh_states[id==2][order(as.numeric(timestep))]$speed), type="l", col="red")
+# plot(as.numeric(veh_states[id==2][order(as.numeric(timestep))]$speed), type="l", col="red")
+# res <- spatnet::stay_points(test_traj$data, minPts = 300)
+# 
+# 
+# abline(v=true_vehicle$starts[true_vehicle$starts < n], col="blue")
+# abline(v=true_vehicle$mids[true_vehicle$mids < n], col="green")
+# abline(v=true_vehicle$ends[true_vehicle$ends < n], col="purple")
+# 
+# plot(veh_info$speed, type="l", col="red")
+# abline(v=seq(n), col=true_vehicle$cluster[1:n] + 1)
+# 
+# 
+
+
+
+# table(true_vehicle$cluster[1:n])
+# 
+# rle(true_vehicle$cluster[1:n])
+# 
+# veh_pos <- osu_net$vehiclePos(probe = list(id = "probe1", type = "DEFAULT_VEHTYPE", freq = "0.1"), 
+#                               flags = "--step-length 0.1")
+# 
+# plot(as.numeric(veh_pos[id==0]$speed), type="l", col="red")
+# abline(v=which(as.integer(veh_states[id==0][order(as.numeric(timestep))]$signals) >= 8), col="blue")
+# 
+# 
+# 
+# normalize <- function(x) (x - min(x)) / (max(x) - min(x))
+# 
+# ## Speed chart 
+# car <- "33"
+# cvehicle <- truth[[car]]
+# plot(cvehicle$speed[1:cvehicle$stop], type="l", col="red")
+# abline(v=which(cvehicle$cluster[1:cvehicle$stop] > 0), type="l", col="blue")
+# 
+# ## vehicle positions in the geospace
+# pos_xy <- as.matrix(apply(veh_states[id==as.numeric(car)][order(as.numeric(timestep)), .(x, y)], 2, as.numeric))
+# veh_pos <- sp::coordinates(osu_net$projectCRS(pos_xy))
+# latlong <- structure(as.data.frame(veh_pos), names=c("lng", "lat"))
+# track_stops <- which(cvehicle$cluster[1:cvehicle$stop] > 0)
+# 
+# cveh_rle <- rle(cvehicle$cluster[1:cvehicle$stop])
+# plot(cvehicle$speed[1:cvehicle$stop], type="l", col="red")
+# mapply(function(i, j, c_i, v_i) {
+#   if (v_i == 0){
+#     abline(v=i:j, col=palette()[c_i])
+#   }
+# }, cumsum(cveh_rle$lengths)[-length(cveh_rle$lengths)], cumsum(cveh_rle$lengths)[-1], 
+# 1:length(cumsum(cveh_rle$lengths)), cveh_rle$values)
+# 
+# ## Leaflet map of car 
+# suppressMessages({ library("leaflet") }) 
+# osm_template <- "http://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+# arcgis_template <- "http://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+# corrected <- match( cvehicle$cluster, unique(cvehicle$cluster))
+# par(col=length(unique(corrected)))
+# m <- leaflet() %>% 
+#     setView(lng = apply(osu_bbox, 1, mean)[[1]], lat = apply(osu_bbox, 1, mean)[[2]], zoom = 14) %>% 
+#     addTiles(urlTemplate=arcgis_template) %>% 
+#     addPolylines(lng = latlong$lng, lat = latlong$lat, col="white") %>% 
+#     addCircles(lng = latlong[track_stops,]$lng, lat = latlong[track_stops,]$lat, 
+#                color = palette()[corrected[1:cvehicle$stop][track_stops]-1], 
+#                radius=1, opacity=0.01)
+#     
+# m
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# alpha_speed <- 1 - normalize(na.omit(as.numeric(truth[[car]]$speed)))
+# alpha_speed <- sapply(alpha_speed, function(x) max(x, 0.01))
+# 
+# 
+# 
+# colors <- sapply(seq_along(alpha_speed), function(i) adjustcolor("black", alpha.f = 0.0020))
+# plot(veh_pos[id==as.numeric(car)][order(timestep), .(lon, lat)], pch=20, 
+#      col=colors, cex=3.5)
+# 
+# 
+# 
+# 
+# 
+# plot(veh_pos[id==as.numeric(car)][order(timestep), .(lon, lat)])
+# points(veh_pos[id==as.numeric(car)][order(timestep), .(lon, lat)], col=truth[["4"]]$cluster+1)
+#      # pch=20, col=colors, cex=3.5)
+# 
+# 
+# plot(truth[["4"]]$speed, type="l", col="red")
+# 
+# 
+# ## TODO benchmark angle 
+# veh_states[id == 0][order(as.integer(timestep))]$angle
+# 
+# veh_acc[vehicle==0]$acceleration/100
+# 
+
+  ## Getting motion states 
+# veh_motion <- osu_net$vehicleAcc("tmp_traj.xml")
+# plot(as.numeric(veh_motion[vehicle==0][order(as.integer(time))]$speed), type="l", col="red")
+# 
+# 
+#   ## Probes can be used to resimulate the data, keeping the same trips/routing information, but recording various data 
+#   ## during the simulation in a way that wasn't recorded by the previous simulation. 
+#   osu_net$vehiclePos(probe = list(id = "probe1", type = "DEFAULT_VEHTYPE", freq = "1"))
+
+# 
+```
+
+
+
+
+### Parsing GeoLife 
+```{r}
+  library("lubridate")
+  base_folder <- "~/WaCS/reporting/VLDB17 - POI_HDBSCAN/data/Geolife Trajectories 1.3/Data"
+  geolife_stay_pts <- new.env(parent = emptyenv())
+  # load(file="~/WaCS/reporting/VLDB17 - POI_HDBSCAN/data/geolife_stay_pts.rdata")
+  for (fname in list.dirs(path = base_folder, recursive = F)){
+    if (is.null(geolife_stay_pts[[fname]])){
+      geolife_stay_pts[[fname]] <- list()
+      for (plt_file in list.files(paste0(fname, "/Trajectory"))){
+          traj <- data.table::fread(paste0(fname, "/Trajectory/", plt_file),  skip = 6)
+          traj <- traj[, .(lat = V1, lng = V2, date = V6, time = V7)]
+          traj <- traj[, .(id=.I, frame=ymd_hms(paste(date, time, sep="_"), tz = "GMT"), lat, lng)]
+          # if (is.null(geolife_stay_pts[[fname]][[plt_file]])){
+          #   geolife_stay_pts[[fname]][[plt_file]] <- spatnet::stay_points(traj[,.(frame, lat, lng)], 
+          #                                                                 minPts = 6, plot = T)
+          # }
+         cat("Done: ", plt_file, "\n")
+         readline(prompt ="Press enter to continue...")
+      }
+    }
+  } # Complex trajectory 20081110013637.plt 
+  save(geolife_stay_pts, file="~/WaCS/reporting/VLDB17 - POI_HDBSCAN/data/geolife_stay_pts.rdata")
+  load("~/WaCS/reporting/SIGSPATIAL17 - Trajectory Segmentation/R/")
+```
+
+
+```{r}
+  
+
+  ## Want information about the network? 
+  junctions <- osu_net$getJunctions()
+  
+  ## Retrieve XY coordinates of junctions
+  locs <- t(sapply(junctions, function(junc) list(x=as.numeric(junc$x), y=as.numeric(junc$y))))
+  locs <- apply(locs, 2, as.numeric)
+  
+  ## Reproject to Lat/Long WSG84
+  osu_net$projectCRS(locs)
+```
+
+```{r}
+  suppressMessages({ library("leaflet") }) 
+  track <- veh_pos[id==as.numeric(car)][order(timestep), .(lon, lat)]
+  track <- apply(track, 2, as.numeric)
+  latlong <- structure(as.data.frame(track), names=c("lng", "lat"))
+  osm_template <- "http://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+  arcgis_template <- "http://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+  m <- leaflet() %>% 
+      setView(lng = apply(osu_bbox, 1, mean)[[1]], lat = apply(osu_bbox, 1, mean)[[2]], zoom = 14) %>% 
+      addTiles(urlTemplate=arcgis_template) %>% 
+      addPolylines(lng = latlong$lng, lat = latlong$lat)
+      
+  m
+  loc_df <- as.data.frame(sp::spTransform(locs, sp::CRS("+proj=longlat +ellps=WGS84")))
+```
+
+## Mastering GeoLife 
+```{r}
+{ library("data.table"); library("lubridate") }
+load("/Users/mpiekenbrock/WaCS/reporting/mpiekenbrockNotes/geolife.rdata")
+labels <- lapply(ls(geolife), function(key) geolife[[key]]$labels)
+
+data.table::rbindlist(lapply(labels, as.data.table), idcol = "id")
+
+truth_geolife <- new.env(parent = emptyenv())
+for (key in ls(geolife)){
+  ctraj <- geolife[[key]]
+  cl <- rep(0, nrow(ctraj$traj))
+  if (!is.null(ctraj[["labels"]])){
+      for (m in 1:nrow(ctraj$labels)){
+        m_i <- which(ctraj$traj$frame %within% (ctraj$labels[m]$`Start Time` %--% ctraj$labels[m]$`End Time`))
+        cl[m_i] <- ctraj$labels[m]$`Transportation Mode`
+      }
+    truth_geolife[[key]] <- cl
+  }
+}
+
+plot(geolife[["021"]]$traj[, .(lng, lat)])
+points(geolife[["021"]]$traj[, .(lng, lat)], col=as.integer(as.factor(truth_geolife[["021"]])))
+
+```
+
+
+```{r}
+# joins <- new.env(parent = emptyenv())
+# mapping <- class::knn1(pj_xy, ij_xy, 1:nrow(pj_xy))
+# invisible(mapply(function(iid, pid) joins[[pid]] <- c(joins[[pid]], ij[[iid]][c("incLanes", "intLanes")]), 
+#        1:length(mapping), as.character(mapping)))
+# 
+# for (pjunc in ls(joins)){
+#   pid <- as.integer(pjunc)
+#   
+#   ## Merge internal lanes of internal junctions with internal lanes of nearest plain junction
+#   pj[[pid]][["intLanes"]] <- 
+#     paste0(pj[[pid]][["intLanes"]], " ", unlist(joins[[pjunc]][names(joins[[pjunc]]) == "intLanes"]), collapse = " ")
+#   
+#   ## Merge incoming lanes of internal junctions with incoming lanes of nearest plain junction
+#   pj[[pid]][["incLanes"]] <- 
+#     paste0(pj[[pid]][["incLanes"]], " ", unlist(joins[[pjunc]][names(joins[[pjunc]]) == "incLanes"]), collapse = " ")
+# }
+
+```
+
+
