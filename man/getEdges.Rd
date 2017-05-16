@@ -2,7 +2,10 @@
 % Please edit documentation in R/sumo.R
 \name{getEdges}
 \alias{getEdges}
+\alias{getEdges}
 \title{getEdges}
 \description{
 Converts an OSM map to a SUMO road network suitable for simulation.
+
+Retrieves edges in SUMO road network
 }

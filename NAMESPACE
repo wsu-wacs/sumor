@@ -2,6 +2,7 @@
 
 export(sumo)
 exportClasses(sumo)
+import(data.table)
 import(methods)
 import(sp)
 import(xml2)

@@ -13,20 +13,19 @@ The focus of the package is to simplify or enhance the configuration, execution,
 2. Install the release version of `devtools` from CRAN with `install.packages("devtools")`
 3. Install `sumor` with: 
 ```R
-	devtools::install_github("https://github.com/wsu-wacs/sumor")
+devtools::install_github("https://github.com/wsu-wacs/sumor")
 ```
 
 4. Configure the variables needed from Step (1):
 
 ```R
-	## Load library, set SUMO home path 
-	suppressMessages({ library("sumor", quietly = T) })
-	Sys.setenv(SUMO_HOME="/opt/local/share/sumo")
-	  
-	## Create temporary directory to store all the 
-	## intermediate data files (optional)
-	if (!dir.exists("./tmp")){ dir.create("./tmp") }
-	Sys.setenv(SUMO_TMP=paste0(getwd(),"/tmp/"))
+## Load library, set SUMO home path 
+suppressMessages({ library("sumor", quietly = T) })
+Sys.setenv(SUMO_HOME="/opt/local/share/sumo")
+  
+## Create temporary directory to store all the intermediate data files (optional)
+if (!dir.exists("./tmp")){ dir.create("./tmp") }
+Sys.setenv(SUMO_TMP=paste0(getwd(),"/tmp/"))
 ```
 ## Usage 
 SUMO is a microscopic, space-continuous road traffic simulation. SUMO simulations require-as-input and produce-as-output [numerous varieties](http://sumo.dlr.de/wiki/Other/File_Extensions) of XML or similar-format files on disk. The information within these files are the modus operandi   The __sumor__ package is entirely designed a the [Reference Class](https://stat.ethz.ch/R-manual/R-devel/library/methods/html/refClass.html) design in R. 
@@ -40,27 +39,27 @@ To access the SUMO API, simply create a new object of type 'sumo':
 Although its possible to [build a network from scratch with SUMO](http://sumo.dlr.de/wiki/Networks/Building_Networks_from_own_XML-descriptions), for larger projects working with geographical areas, importing map data from an external source is much easier. You can download [OpenStreetMap](https://www.openstreetmap.org/about) (OSM) data for use with SUMO using the `getOSM` method by passing an (sp) bounding box: 
 
 ```R     
-  ## (Selected from http://boundingbox.klokantech.com)
-  columbus_bbox <- sp::bbox(matrix(c(-83.024733,39.995205,-83.006923,40.005429), ncol=2, byrow = T)) 
-  sumo_net$getOSM(columbus_bbox, file = "columbus.osm")
+## (Selected from http://boundingbox.klokantech.com)
+columbus_bbox <- sp::bbox(matrix(c(-83.024733,39.995205,-83.006923,40.005429), ncol=2, byrow = T)) 
+sumo_net$getOSM(columbus_bbox, file = "columbus.osm")
 ```
 This will download the OSM data into the directory pre-specified by _SUMO_TMP_, or a temporary directory if the path wasn't set. The next step is to convert the OSM data into a usable SUMO road network suitable for simulation using [NETCONVERT](http://sumo.dlr.de/wiki/NETCONVERT)
 
 ```R  
-  sumo_net$netconvert(urban = T, pedestrian = T, polygons = T)
+sumo_net$netconvert(urban = T, pedestrian = T, polygons = T)
 ```
 The parameters to `netconvert` control the use of the default [conversion typemap](http://sumo.dlr.de/wiki/Networks/Import/OpenStreetMap#Recommended_Typemaps). 
 
 There are hundreds of parameters that to tweak that change how traffic is generated. The following generate an hour of random traffic, where at most n = 1 car arrives with probability p = 0.5 every second. 
 
 ```R
-  ## Generate trips and routes (s seconds * m minutes * h hours)
-  osu_net$randomTrips(start = 0, end = 60 * 60 * 1, n = 1, p = 2)
+## Generate trips and routes (s seconds * m minutes * h hours)
+osu_net$randomTrips(start = 0, end = 60 * 60 * 1, n = 1, p = 2)
 ```
 To view the simulation itself through the [SUMO-GUI](http://sumo.dlr.de/wiki/SUMO-GUI), simply call the `viewSimulation` method:  
 
 ```R
-  osu_net$viewSimulation() 
+osu_net$viewSimulation() 
 ```
 ## Further information
 The entire __sumor__ package in encapsulated in reference class methods implemented as part of the sumo class definition, [sumo.R](src/sumo.R). To get an index of all of the methods implemented by the package, use: 
