@@ -21,6 +21,22 @@ sumo$methods(setSource=function(source, type="osm", ...){
 
 })
 
+
+#' @title toMeters
+#' @name toMeters
+#' @description Converts lat/long to meters.
+sumo$methods(toMeters=function(lat1, lon1, lat2, lon2){
+  R = 6378.137 ## Radius of earth in KM
+  dLat = lat2 * pi / 180 - lat1 * pi / 180
+  dLon = lon2 * pi / 180 - lon1 * pi / 180
+  a = sin(dLat/2) * sin(dLat/2) +
+    cos(lat1 * pi / 180) * cos(lat2 * pi / 180) *
+    sin(dLon/2) * sin(dLon/2)
+  c = 2 * atan2(sqrt(a), sqrt(1-a))
+  d = R * c
+  return(d * 1000) #  meters
+})
+
 #' @title netconvert
 #' @name netconvert
 #' @description Converts an OSM map to a SUMO road network suitable for simulation.
@@ -82,7 +98,7 @@ sumo$methods(addStops = function(route_file = "tmp.rou.xml", new_route_file = ro
   ## Get all edges that allow pedestrians
   all_edges <- getEdges()
   all_edge_ids <- xml2::xml_attr(all_edges, "id")
-  ped_edges <- xml2::xml_parent(xml2::xml_find_all(xml_net, "edge/lane[@allow='pedestrian']"))
+  ped_edges <- getPedestrianEdges()
   edge_info <- data.table::rbindlist(lapply(xml2::xml_attrs(ped_edges), as.list), fill = T)
 
   ## Get all the junctions ids
@@ -114,8 +130,15 @@ sumo$methods(addStops = function(route_file = "tmp.rou.xml", new_route_file = ro
     walk
   }
 
+  ## Check connection of an edge to make sure there's an existing connection
+  # check_connection <- function(eid){
+  #   # <connection from=":1747241430_w0" to="e63" fromLane="0" toLane="0" dir="s" state="M"/>
+  #   conns <- xml2::xml_find_all(xml_net, xpath = "//connection")
+  # }
+
+  pb <- txtProgressBar(min = 0, max = xml2::xml_length(routes), style = 3)
   for (i in 1:(xml2::xml_length(routes))){
-    print(i)
+    # print(i)
     ## Retrieve the persons current route
     person_route <- xml2::xml_find_first(routes, xpath=paste0("//person[", i, "]"))
     route <- xml2::as_list(person_route)
@@ -181,6 +204,7 @@ sumo$methods(addStops = function(route_file = "tmp.rou.xml", new_route_file = ro
         prev_stop <- ""
       }
       ctarget_node <- ctarget_node + 1L
+
     }
     ## Add last segment
     # wedges <- trimws(paste0(c(prev_stop, walk_segments[[length(walk_segments)]]), collapse = " "))
@@ -188,8 +212,10 @@ sumo$methods(addStops = function(route_file = "tmp.rou.xml", new_route_file = ro
       xml2::xml_add_child(person, walk)
     }
     xml2::xml_replace(person_route, person)
+    setTxtProgressBar(pb, value = i)
   }
-  xml2::write_xml(routes, file = paste0(osu_net$config$SUMO_TMP, new_route_file))
+  close(pb)
+  xml2::write_xml(routes, file = paste0(config$SUMO_TMP, new_route_file))
 })
 
 #' @title mergeTrips
@@ -232,7 +258,7 @@ sumo$methods(addPolys = function(poly_file = "tmp.poly.xml", buildings_only=F, i
   junctions <- getJunctions(simplify = TRUE)
 
   ## Get the nodes that allow pedestrians
-  p_edges <- xml2::xml_find_all(xml_net, "edge[lane[@allow='pedestrian']]")
+  p_edges <- getPedestrianEdges()
   from_nodes <- xml2::xml_attr(p_edges, "from")
   to_nodes <- xml2::xml_attr(p_edges, "to")
   pedestrian_reachable_nodes <- na.omit(unique(c(from_nodes, to_nodes)))
@@ -376,9 +402,17 @@ sumo$methods(addPolys = function(poly_file = "tmp.poly.xml", buildings_only=F, i
                    "-o", paste0(config$SUMO_TMP, network),
                    "--plain.extend-edge-shape --geometry.remove --roundabouts.guess --ramps.guess --junctions.join --xml-validation.net always")
   system(command)
+
+  ## SUMO doesn't allow conversion of the 'function' attribute for edges, so manually change those
+  # sumo_net <- getNetwork()
+  # edges <- xml2::xml_find_all(sumo_net, "//edge")
+  # edge_ids <- xml2::xml_attr(edges, "id")
+  #
+  # ## Make any new edge that leads into a building invisible in the sumo GUI
+  # sub_edges <- grep(x = edge_ids, pattern = paste0("e[[:digit:]]+_?[[:digit:]]*"))
+  # xml2::xml_attr(edges[sub_edges], "function") <- "connector"
+  # xml2::write_xml(sumo_net, paste0(config$SUMO_TMP, network))
 })
-
-
 
 
 #' @title plot
@@ -559,7 +593,7 @@ sumo$methods(getEdges = function(simplify = FALSE){
   sumo_net <- getNetwork()
   if (simplify){
     res <- as_list(xml_find_all(sumo_net, "//edge"))
-    res <- lapply(res, function(edge) append(attributes(edge), list(lanes=unlist(edge))))
+    res <- lapply(res, function(edge) append(attributes(edge), list(lanes=attributes(edge$lane))))
     return(res)
   } else {
     return(xml2::xml_find_all(sumo_net, xpath = "//edge"))
@@ -636,11 +670,11 @@ sumo$methods(genConfig = function(begin, end, file="tmp.sumocfg"){
 #' @name simulate
 #' @description Uses a SUMO road network to generate road traffics
 sumo$methods(simulate = function(flags=""){
-  if (is(osu_net$configuration, "uninitializedField")){
+  if (is(configuration, "uninitializedField")){
     stop("SUMO configuration file not found. Has genConfig been called?")
   } else {
-    cat(paste0("sumo -c ", osu_net$configuration, " ", flags))
-    system(paste0("sumo -c ", osu_net$configuration, " ", flags))
+    cat(paste0("sumo -c ", configuration, " ", flags))
+    system(paste0("sumo -c ", configuration, " ", flags))
   }
 })
 
@@ -652,7 +686,7 @@ sumo$methods(vehicleProbe = function(probe = list(id="probe1", type="DEFAULT_VEH
   vTypeProbe <- XML::newXMLNode("vTypeProbe", parent = additional, attrs = probe)
   settings_files <- paste0(config$SUMO_TMP, "tmp_vehprobe_settings.xml")
   XML::saveXML(config_doc, file = settings_files)
-  command <- paste0("sumo -c ", osu_net$configuration, " ", flags, " --additional-files ", settings_files)
+  command <- paste0("sumo -c ", configuration, " ", flags, " --additional-files ", settings_files)
   cat(command)
   status <- system(command)
 
@@ -727,7 +761,23 @@ sumo$methods(getFCD = function(fcd_file, flags=""){
   }
 })
 
-#' @title Generate SUMO Configuration
+#' @title Get pedestrian edges
+#' @name getPedestrianEdges
+#' @description Returns the edges that have any lane allowing pedestrian traffic
+sumo$methods(getPedestrianEdges = function(){
+  ## Get all edges that allow pedestrians
+  lanes <- xml2::xml_find_all(getNetwork(), xpath = "//lane")
+  lane_indices <- sapply(xml2::as_list(lanes), function(lane) {
+    if ("allow" %in% names(attributes(lane))){
+      allowances <- attr(lane, "allow")
+      return("pedestrian" %in% unlist(strsplit(allowances, " ")))
+    } else FALSE;
+  })
+  edges <- xml2::xml_parent(lanes[lane_indices])
+  return(edges)
+})
+
+#' @title Get target nodes
 #' @name getTargetNodes
 #' @description Returns the target nodes (junctions) of each edges in a given route
 sumo$methods(getTargetNodes = function(){
@@ -736,7 +786,7 @@ sumo$methods(getTargetNodes = function(){
   edge_routes <- xml2::xml_attr(xml2::xml_find_all(routes, "//person/walk"), "edges")
 
   ## Get all edges that allow pedestrians
-  edges <- xml2::xml_find_all(osu_net$getNetwork(), "edge[lane/@allow='pedestrian']")
+  edges <- getPedestrianEdges()
   edge_info <- data.table::rbindlist(lapply(xml2::xml_attrs(edges), as.list), fill = T)
 
   ## Extract the sequential edges to be traveled along
@@ -745,14 +795,16 @@ sumo$methods(getTargetNodes = function(){
 
   ## Extract nodes traversed by the edge routes, inclusive of the start, exclusive of the end
   ## (since cannot be determined)
-  target_nodes <- lapply(edge_routes, function(ers){
+  target_nodes <- mapply(function(ers, i){
     if (length(ers) == 1) return(NULL)
+    # print(i)
     mapply(function(s, e) {
+      # cat(c(s, e))
       pair <- edge_info[ers[s:e], .(id, from, to)]
       res <- names(which(table(c(pair$from, pair$to)) == 2))
       ifelse(length(res) > 1, "UNKNOWN", res) # || is.null(res) || is.na(res)
     }, 1:(length(ers) - 1L), 2:length(ers))
-  })
+  }, edge_routes, 1:length(edge_routes))
   return(target_nodes)
 })
 
