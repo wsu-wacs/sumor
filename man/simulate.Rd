@@ -9,3 +9,63 @@ Uses a SUMO road network to generate road traffics
 
 Uses a SUMO road network to generate road traffics
 }
+\details{
+#' @title randomTrips2
+#' @name randomTrips2
+#' @description Uses a SUMO road network to generate road traffics
+sumo$methods(randomTrips2 = function(start=0, end=3600, lambda = 1, unit = "second", person = F){
+
+## SUMO-RandomTrips generates routes and trips
+  cat("Running Road Traffic Simulation...\n")
+  SUMO_TMP <- config$SUMO_TMP
+  xml_net <- xml2::read_xml(paste0(SUMO_TMP, network))
+
+## Generate trips
+  trip_file <- xml2::xml_new_document()
+  xml2::xml_add_child(xml2::read_xml("<routes xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:noNamespaceSchemaLocation=\"http://sumo.dlr.de/xsd/routes_file.xsd\">"))
+
+## Get junction data
+  junctions <- xml2::xml_find_all(xml_net, xpath = "//junction")
+  int_junctions <- Filter(junctions, f = function(junc) junc$type == "internal")
+
+## Generate number of arrivals at each time unit ahead of time
+  n_arrivals <- rpois(end - start, lambda = lambda)
+  ##
+
+## Calculate "fringe-factor"
+  geo_center <- apply(osu_net$config$bbox, 1, mean)
+  n_constant <- dist(rbind(geo_center, osu_net$config$bbox[, 1]))
+
+## Get junction (x, y) coordinates + distance to center
+  junc_xy <- lapply(xml2::xml_attrs(junctions), function(j) as.list(j[c("x", "y")]))
+  junc_xy <- data.table::rbindlist(junc_xy)[, .(x=as.numeric(x), y=as.numeric(y))]
+  junc_dist <- sapply(1:nrow(junc_xy), function(i) dist(rbind(as.numeric(junc_xy[i,]), geo_center)))
+  junc_dist/sum(n_constant)
+
+## Get the distribution of how often each junction should be picked (uniformly prefer junctions on the fringe)
+  junc_prob <- junc_dist/sum(junc_dist)
+
+## Generate random origin and destinations
+  origins <- sapply(n_arrivals, function(n_arrivals) sample(x = 1:nrow(junc_xy), size = n_arrivals, prob = junc_prob, replace = T))
+  destinations <- sapply(n_arrivals, function(n_arrivals) sample(x = 1:nrow(junc_xy), size = n_arrivals, prob = junc_prob, replace = T))
+
+route_file <- xml2::xml_new_document()
+  base <- "sumo-randomTrips"
+  net_inp <- paste0("-n ", SUMO_TMP, network)
+  route_inp <- paste0("-r ", SUMO_TMP, "tmp.rou.xml")
+  trip_inp <- paste0("-o ", SUMO_TMP, "tmp.trips.xml")
+  time_inp <- paste0("-s ", start, " -e ", end)
+  type_inp <- paste0("-p ", p, " -l --binomial=", n)
+
+## Assemble command and simulate
+  command <- paste(base, net_inp, route_inp, trip_inp, time_inp, type_inp)
+  if (person) command <- paste(command, "--pedestrians")
+  cat("Running command: ")
+  cat(command)
+  config$sim_status <- system(command)
+  if (config$sim_status == 0){
+    trips <- paste0(SUMO_TMP, "tmp.trips.xml")
+    routes <- paste0(SUMO_TMP, "tmp.rou.xml")
+  }
+})
+}

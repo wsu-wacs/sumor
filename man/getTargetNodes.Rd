@@ -2,7 +2,7 @@
 % Please edit documentation in R/sumo.R
 \name{getTargetNodes}
 \alias{getTargetNodes}
-\title{Generate SUMO Configuration}
+\title{Get target nodes}
 \description{
 Returns the target nodes (junctions) of each edges in a given route
 }

@@ -7,4 +7,6 @@
 #'
 #' @docType package
 #' @name sumor
+#' @useDynLib sumor
+#' @importFrom Rcpp sourceCpp
 NULL

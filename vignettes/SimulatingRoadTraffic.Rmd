@@ -95,7 +95,7 @@ Thus, for efficiency, it's useful to process the simulation in batch mode, extra
 ```{r}
 suppressMessages({ library("data.table", quietly = T) })
 ## How much time to simulate for? (batch mode: 15 minutes)
-sim_length <- hours(6)
+sim_length <- hours(2)
 increment <- hours(1) / 4
 sim_intervals <- data.table::data.table(start=seq(0, sim_length - increment, by = increment), 
                                         end=seq(increment, sim_length, by = increment) - 1)

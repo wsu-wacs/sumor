@@ -3,6 +3,7 @@
 #' @description Reference class implementation that enables easy use of SUMO functionality
 #' through the maintaining of consistent reference class states. Suitable for simulation.
 #' @import methods sp xml2 data.table
+#' @importFrom lubridate dminutes
 #' @export sumo
 #' @exportClass sumo
 sumo <- setRefClass("sumo", fields = c("source", "trips", "network", "config", "configuration"))
@@ -21,6 +22,39 @@ sumo$methods(setSource=function(source, type="osm", ...){
 
 })
 
+#' @title quickSim
+#' @name quickSim
+#' @description Begins a quick SUMO simulation with random trips. Used to generate movement data.
+sumo$methods(quickSim = function(bbox, sim_len = dminutes(15)){
+  getOSM(bbox, file = "osm_file") # get osm map, set source
+  netconvert(urban = T, pedestrian = T, polygons = T, flags = "--sidewalks.guess --crossings.guess TRUE")
+
+  ## Generate routing information
+  randomTrips(start=0, end=as.integer(sim_len), p = 1, n = 1)
+
+  ## Process the simulation in batch mode
+  sim_len <- as.integer(sim_len)
+  batch_len <- as.integer(dminutes(5))
+  batch_len <- ifelse(sim_len < batch_len, sim_len, batch_len)
+  batches <- levels(cut(c(0, sim_len), as.integer(sim_len/batch_len), ordered_result = T))
+  sim_intervals <- data.table(start = as.numeric(sub("\\((.+),.*", "\\1", batches)),
+                              end = as.numeric( sub("[^,]*,([^]]*)\\]", "\\1", batches)))
+  sim_intervals[1]$start <- 0
+  sim_intervals[nrow(sim_intervals)]$end <- sim_len
+
+  ## Method to extract exemplars from trajectory source
+  res = vector(mode = "list", length = nrow(sim_intervals))
+  for (i in 1:nrow(sim_intervals)) {
+    ## Running the simulation generated with randomTrips (0.01 == 10ms intervals)
+    genConfig(begin = sim_intervals[i]$start, end = sim_intervals[i]$end)
+    sim_flags <- paste("--step-length 0.5", "--fcd-output", paste0(config$SUMO_TMP, "tmp_fcd.xml"))
+    simulate(flags = sim_flags)
+
+    ## get 'floating car data' (records pedestrian movements as well)
+    res[[i]] <- getFCD(paste0(config$SUMO_TMP, "tmp_fcd.xml"))
+  }
+  res
+})
 
 #' @title toMeters
 #' @name toMeters
@@ -90,7 +124,7 @@ sumo$methods(netconvert = function(src_net = NA, net_file = "tmp.net.xml", net_t
 #' @description For every pedestrian route walking along a road, if he/she travels to a junction connected to
 #' a building, then this function will augment the route he/she is on to travel inside the building, waiting for
 #' a specific duration (designated by the building type), and then walks out and conintues on the original route
-sumo$methods(addStops = function(route_file = "tmp.rou.xml", new_route_file = route_file){
+sumo$methods(addStops = function(route_file = "tmp.rou.xml", new_route_file = route_file, alpha = 0.15){
   xml_net <- xml2::read_xml(paste0(config$SUMO_TMP, network))
   routes <- xml2::read_xml(paste0(config$SUMO_TMP, route_file))
   routes_list <- xml2::as_list(routes)
@@ -173,14 +207,14 @@ sumo$methods(addStops = function(route_file = "tmp.rou.xml", new_route_file = ro
       new_edge <- ifelse(length(new_edge) > 0, sample(new_edge, size = 1), new_edge)
 
       ## Add the stop along the route
-      if (length(new_edge) > 0 && !is.na(new_edge) && new_edge != prev_stop) {
+      if (runif(1) < alpha && length(new_edge) > 0 && !is.na(new_edge) && new_edge != prev_stop) {
         ## Append previous and current edges to current walk, but add the stop
         wedges <- trimws(paste0(c(prev_stop, segment, new_edge), collapse = " "))
         walk <- append_edges(walk, wedges)
 
         ## Adding a stop; insert current walk + stop, mark the previous stop as the new edge, and create a new walk
         xml2::xml_add_child(person, walk, .copy = TRUE)
-        xml2::xml_add_child(person, xml2::read_xml(paste0(c("<stop lane=\"", paste0(new_edge, "_0"), "\" duration=\"20\"/>"), collapse = "")))
+        xml2::xml_add_child(person, xml2::read_xml(paste0(c("<stop lane=\"", paste0(new_edge, "_0"), "\" duration=\"1\"/>"), collapse = "")))
         prev_stop <- new_edge
 
         ## Add random internal walking/stopping independent of the current visit
@@ -190,7 +224,7 @@ sumo$methods(addStops = function(route_file = "tmp.rou.xml", new_route_file = ro
         for (ns in 1:nsubtrips){
           trip <- sample(edge_subtrips, size = 1)
           xml2::xml_add_child(person, makeObject("walk", list(edges = paste0(c(new_edge, trip), collapse = " "))))
-          xml2::xml_add_child(person, makeObject("stop", list(lane = paste0(trip, "_0"), duration="20")))
+          xml2::xml_add_child(person, makeObject("stop", list(lane = paste0(trip, "_0"), duration="1")))
           xml2::xml_add_child(person, makeObject("walk", list(edges = paste0(c(trip, new_edge), collapse = " "))))
         }
         #xml2::xml_add_child(person, xml2::read_xml(paste0(c("<stop lane=\"", paste0(new_edge, "_0"), "\" duration=\"20\"/>"), collapse = "")))
@@ -248,7 +282,8 @@ sumo$methods(mergeTrips = function(input, final = "tmp.trips.xml"){
 #' @title addPolys
 #' @name addPolys
 #' @description Converts existing polygons into junctions suitable for simulation.
-sumo$methods(addPolys = function(poly_file = "tmp.poly.xml", buildings_only=F, ignore_edges = c()){
+sumo$methods(addPolys = function(poly_file = "tmp.poly.xml", buildings_only=F, ignore_edges = c(),
+                                 poi_res = 1){
 
   ## Initial variables
   SUMO_TMP <- config$SUMO_TMP
@@ -315,7 +350,7 @@ sumo$methods(addPolys = function(poly_file = "tmp.poly.xml", buildings_only=F, i
     poly_node <- makeObject("node", poly_attr)
 
     ## Create internal polygon nodes
-    int_node_xy <- rpip(nrow(poly_xy), poly_xy)
+    int_node_xy <- rpip(nrow(poly_xy)*poi_res, poly_xy)
     int_nodes <- lapply(1:nrow(poly_xy), function(j) list(id = paste0(":b", building_meta[i]$id, "_", j),
                                               type="internal", x = int_node_xy[j,1], y = int_node_xy[j,2]))
     int_nodes <- lapply(int_nodes, function(inode) { makeObject("node", inode) })
