@@ -1,59 +1,161 @@
-#' @title SUMO reference class object
+#' @title SUMO Reference Class
 #' @name sumo
-#' @description Reference class implementation that enables easy use of SUMO functionality
-#' through the maintaining of consistent reference class states. Suitable for simulation.
+#' @description Reference class implementation that enables easy API-access to SUMO functionality suitable for simulation. A few
+#' methods have been added which partially incorporate SUMO's Traffic Control Interface (TraCI) for fast retrieval of certain
+#' types of simulation queries. Additional commands have been added which parse through SUMO's various input files (such as the
+#' SUMO road network itself).
+#' @details Before creating a SUMO object, there are two environmental variables to be aware of. The SUMO_HOME variable must be
+#' set in the environmental prior to creating an object, otherwise it will return an error. Once set, SUMO requires several files
+#' to be saved to the disk prior to creating a simulation. Namely, the SUMO road network must be set up and configured with either
+#' a preconfigured road network, or via some external source (i.e. OSM) with \code{netconvert}. By default, these files are saved
+#' in the 'default' directory and can be accessed via \code{system.file(..., package = "sumor")}. Alternatively, if the SUMO_TMP
+#' variable is defined in the environment, all files will be saved relative to there.
+#' @usage
+#' ## Make sure SUMO_HOME is set to SUMO's locations,
+#' ## i.e. Sys.setenv(SUMO_HOME=...)
+#' sumo_net <- sumo$new()
+#' sumo_net$<method name> ...
+#' @return An reference class object of class "sumo". Methods are accessed with the standard '$'.
+#' @seealso \code{\link[methods]{ReferenceClasses}}
+#' @examples
+#' library("sumor"); library("sp"); library("lubridate")
+#'
+#' ## Select a bounding box; I use http://boundingbox.klokantech.com/
+#' osu_bbox <- bbox(matrix(c(-83.021676,39.9933,-83.005166,40.004366), nrow = 2, byrow = TRUE))
+#'
+#' ## Create the sumo object
+#' osu_net <- sumo$new()
+#'
+#' ## Run quick road simulation w/ default settings
+#' osu_net$quickSim(bbox = osu_bbox, sim_len = lubridate::dhours(0.5), p = 4, n = 1) # on average generate 1 vehicle every 4 seconds
+#'
+#' ## View the simulation.
+#' osu_net$viewSimulation()
+#' @author Matt Piekenbrock
+#' @section Methods:
+#' \subsection{Network and Configuration}{
+#'   \itemize{
+#'     \item{\strong{\code{\link{netconvert}}:}}{ Covert a given source to a SUMO road network.}
+#'     \item{\strong{\code{\link{getOSM}}:}}{ Download an OpenStreetMap tile source.}
+#'     \item{\strong{\code{\link{getNetwork}}:}}{ Retrieve the SUMO road network.}
+#'     \item{\strong{\code{\link{getJunctions}}:}}{ Retrieve the junctions in the SUMO road network.}
+#'     \item{\strong{\code{\link{getPolygons}}:}}{ Retrieve the polygons in the SUMO road network.}
+#'     \item{\strong{\code{\link{addPolys}}:}}{ Add polygon information to the SUMO road network.}
+#'     \item{\strong{\code{\link{mergeTrips}}:}}{ Merge two or more trips files into one.}
+#'     \item{\strong{\code{\link{getEdges}}:}}{ Get the edges of the SUMO road network.}
+#'     \item{\strong{\code{\link{getPedestrianEdges}}:}}{ Retrieve pedestrian-only edges from the SUMO road network. }
+#'     \item{\strong{\code{\link{getTargetNodes}}:}}{ Retrieve the junctions in the SUMO road network, by edge id.}
+#'   }
+#' }
+#' \subsection{Simulation}{
+#'   \itemize{
+#'     \item{\strong{\code{\link{simulate}}:}}{ Run the configured SUMO simulation.}
+#'     \item{\strong{\code{\link{quickSim}}:}}{ Creates a quick SUMO simulation with suitable defaults.}
+#'     \item{\strong{\code{\link{viewSimulation}}:}}{ View the simulation with the SUMO GUI.}
+#'     \item{\strong{\code{\link{randomTrips}}:}}{ Creates random trips suitable for simulation.}
+#'     \item{\strong{\code{\link{getRoutes}}:}}{ Retrieve the routes in the current simulation.}
+#'     \item{\strong{\code{\link{getVehiclePositions}}:}}{ Retrieve the vehicle positions in the current simulation.}
+#'     \item{\strong{\code{\link{genConfig}}:}}{ Generate configuration suitable for simulation.}
+#'     \item{\strong{\code{\link{vehicleProbe}}:}}{ Probe a vehicle for various information.}
+#'     \item{\strong{\code{\link{vehicleAcc}}:}}{ Retrieve vehicle acceleration.}
+#'     \item{\strong{\code{\link{getFCD}}:}}{ Retrieve vehicle 'Floating Car Data.'}
+#'   }
+#' }
+#' \subsection{Utility}{
+#'   \itemize{
+#'     \item{\strong{\code{\link{command}}:}}{ Runs a SUMO command.}
+#'     \item{\strong{\code{\link{projectCRS}}:}}{ Projects SUMO coordinates to arbitrary CRS.}
+#'     \item{\strong{\code{\link{toMeters}}:}}{ Convert WGS84 coordinates to Cartesian coordinates.}
+#'     \item{\strong{\code{\link{plotOSM}}:}}{ View the region to use for the simulation with leaflet.}
+#'  }
+#' }
 #' @import methods sp xml2 data.table
 #' @importFrom lubridate dminutes
 #' @export sumo
 #' @exportClass sumo
 sumo <- setRefClass("sumo", fields = c("source", "trips", "network", "config", "configuration"))
 
-sumo$methods(initialize = function(...){
+literal <- function(str){ paste0("'", str, "'") }
+sumo$methods(initialize = function(..., verbose = FALSE){
   callSuper(...)
   if (nchar(Sys.getenv("SUMO_HOME")) <= 1) stop("sumo expects the environmental variable 'SUMO_HOME' to be set")
+  sumo_path <- paste0(normalizePath(Sys.getenv("SUMO_HOME")), .Platform$file.sep)
+
+  ## File and directory checks
+  if (!file.exists(paste0(sumo_path, "/bin/sumo"))) stop("Sumo executable not found in 'bin' folder of SUMO_HOME.")
+  if (!dir.exists(paste0(sumo_path, "/tools"))) stop("SUMO tools not found in 'tools' folder of SUMO_HOME.")
+  if (!dir.exists(paste0(sumo_path, "/data"))) stop("SUMO data not found in 'data' folder of SUMO_HOME.")
   if (nchar(Sys.getenv("SUMO_TMP")) <= 1){
-    sumo_tmp <-  paste0(normalizePath(tempdir()), "/")
-  } else { sumo_tmp <- Sys.getenv("SUMO_TMP") }
-  config <<- list(SUMO_HOME = Sys.getenv("SUMO_HOME"), SUMO_TMP = sumo_tmp)
+    sumo_tmp <- file.path(paste0(system.file("default", package = "sumor"), .Platform$file.sep))
+  } else { sumo_tmp <- paste0(normalizePath(Sys.getenv("SUMO_TMP")), .Platform$file.sep) }
+  config <<- list(SUMO_HOME = Sys.getenv("SUMO_HOME"), SUMO_TMP = sumo_tmp, verbose = verbose)
 })
 
-sumo$methods(setSource=function(source, type="osm", ...){
-  if (class(source) != "character") stop("sumo expects the source object to be a filepath")
-
+#' @name Command
+#' @title Command
+#' @description Runs a SUMO command equivalent to running "< SUMO_HOME >/bin/< command >"
+sumo$methods(command = function(cmd){
+  bin_path <- normalizePath(paste0(config$SUMO_HOME, "/bin/"))
+  final_cmd <- paste0(bin_path, .Platform$file.sep, cmd)
+  if (config$verbose) cat("Running command:", paste(final_cmd, "\n"))
+  status <- invisible(suppressMessages(system(final_cmd, ignore.stdout = config$verbose)))
+  return(status)
 })
+
+#' @name startSumoServer
+#' @title Start SUMO Simulation
+#' @description Starts a SUMO simulation on the given port number.
+sumo$methods(startSumoServer = function(port=1337){
+  if(class(configuration) == "uninitializedField") stop("SUMO configuration must be generated with genConfig.")
+  start_sumo <- paste0("sumo -c ", configuration, " --remote-port ", port, " &")
+  status <- command(start_sumo)
+  Sys.sleep(1) ## Wait for the process to start up
+  is_working <- system(paste0("lsof -i tcp:", port), ignore.stdout = F, intern = T)
+  return(length(is_working) >= 2)
+})
+
+# sumo$methods(setSource=function(source, type="osm", ...){
+#   if (class(source) != "character") stop("sumo expects the source object to be a filepath")
+#
+# })
 
 #' @title quickSim
 #' @name quickSim
-#' @description Begins a quick SUMO simulation with random trips. Used to generate movement data.
-sumo$methods(quickSim = function(bbox, sim_len = dminutes(15)){
-  getOSM(bbox, file = "osm_file") # get osm map, set source
-  netconvert(urban = T, pedestrian = T, polygons = T, flags = "--sidewalks.guess --crossings.guess TRUE")
+#' @description Starts a quick generic simulation. Used for testing.
+sumo$methods(quickSim = function(bbox, sim_len = dminutes(15), p = 1, n = 1, ...){
+  getOSM(bbox, file = "tmp.osm") # get osm map, set source
+  if (!file.exists(paste0(config$SUMO_TMP, "tmp.net.xml"))){
+    netconvert(urban = T, pedestrian = T, polygons = T, flags = "--sidewalks.guess --crossings.guess TRUE")
+  } else { warning("SUMO Road network detected. Settings configuration to use existing file.") }
 
   ## Generate routing information
-  randomTrips(start=0, end=as.integer(sim_len), p = 1, n = 1)
+  randomTrips(start=0, end=as.integer(sim_len), p = p, n = n, ...)
+
+  ## Generate configuration for the entire simulation
+  genConfig(0, as.integer(sim_len), file="tmp.sumocfg")
 
   ## Process the simulation in batch mode
-  sim_len <- as.integer(sim_len)
-  batch_len <- as.integer(dminutes(5))
-  batch_len <- ifelse(sim_len < batch_len, sim_len, batch_len)
-  batches <- levels(cut(c(0, sim_len), as.integer(sim_len/batch_len), ordered_result = T))
-  sim_intervals <- data.table(start = as.numeric(sub("\\((.+),.*", "\\1", batches)),
-                              end = as.numeric( sub("[^,]*,([^]]*)\\]", "\\1", batches)))
-  sim_intervals[1]$start <- 0
-  sim_intervals[nrow(sim_intervals)]$end <- sim_len
+  # sim_len <- as.integer(sim_len)
+  # batch_len <- as.integer(dminutes(5))
+  # batch_len <- ifelse(sim_len < batch_len, sim_len, batch_len)
+  # batches <- levels(cut(c(0, sim_len), as.integer(sim_len/batch_len), ordered_result = T))
+  # sim_intervals <- data.table(start = as.numeric(sub("\\((.+),.*", "\\1", batches)),
+  #                             end = as.numeric( sub("[^,]*,([^]]*)\\]", "\\1", batches)))
+  # sim_intervals[1]$start <- 0
+  # sim_intervals[nrow(sim_intervals)]$end <- sim_len
 
   ## Method to extract exemplars from trajectory source
-  res = vector(mode = "list", length = nrow(sim_intervals))
-  for (i in 1:nrow(sim_intervals)) {
-    ## Running the simulation generated with randomTrips (0.01 == 10ms intervals)
-    genConfig(begin = sim_intervals[i]$start, end = sim_intervals[i]$end)
-    sim_flags <- paste("--step-length 0.5", "--fcd-output", paste0(config$SUMO_TMP, "tmp_fcd.xml"))
-    simulate(flags = sim_flags)
-
-    ## get 'floating car data' (records pedestrian movements as well)
-    res[[i]] <- getFCD(paste0(config$SUMO_TMP, "tmp_fcd.xml"))
-  }
-  res
+  # res = vector(mode = "list", length = nrow(sim_intervals))
+  # for (i in 1:nrow(sim_intervals)) {
+  #   ## Running the simulation generated with randomTrips (0.01 == 10ms intervals)
+  #   genConfig(begin = sim_intervals[i]$start, end = sim_intervals[i]$end)
+  #   sim_flags <- paste("--step-length 0.5", "--fcd-output", paste0(config$SUMO_TMP, "tmp_fcd.xml"))
+  #   simulate(flags = sim_flags)
+  #
+  #   ## get 'floating car data' (records pedestrian movements as well)
+  #   res[[i]] <- getFCD(paste0(config$SUMO_TMP, "tmp_fcd.xml"))
+  # }
+  # res
 })
 
 #' @title toMeters
@@ -80,40 +182,36 @@ sumo$methods(netconvert = function(src_net = NA, net_file = "tmp.net.xml", net_t
   if (missing(src_net) && is.null(source)) { stop("source has not been populated") }
   if (!missing(src_net)){ source <<- src_net }
   network <<- net_file
-  SUMO_HOME <- config$SUMO_HOME
-  SUMO_TMP <- config$SUMO_TMP
 
   ## Use OSM and built-in OSM-to-SUMO defaults to build the SUMO network
   cat("Converting to SUMO network...\n")
   base <- "netconvert"
-  base_type <- paste("--type-files", paste0(SUMO_HOME, "/data/typemap/", net_type))
+  base_type <- paste("--type-files", paste0(config$SUMO_HOME, "/data/typemap/", net_type))
   type_file <- base_type
-  if (urban) { type_file <- paste(type_file, paste0(SUMO_HOME, "/data/typemap/osmNetconvertUrbanDe.typ.xml"), sep = ",") }
-  if (pedestrian) { type_file <- paste(type_file, paste0(SUMO_HOME, "/data/typemap/osmNetconvertPedestrians.typ.xml"), sep = ",") }
+  if (urban) { type_file <- paste(type_file, paste0(config$SUMO_HOME, "/data/typemap/osmNetconvertUrbanDe.typ.xml"), sep = ",") }
+  if (pedestrian) { type_file <- paste(type_file, paste0(config$SUMO_HOME, "/data/typemap/osmNetconvertPedestrians.typ.xml"), sep = ",") }
 
   ## Cleaning process, replace file
-  osm_file <- paste("--osm-files", paste0(SUMO_TMP, source))
-  out_file <- paste("--output-file", paste0(SUMO_TMP, network))
+  osm_file <- paste("--osm-files", literal(paste0(config$SUMO_TMP, source)))
+  out_file <- paste("--output-file", literal(paste0(config$SUMO_TMP, network)))
   flags <- paste(defaults, flags)
 
   ## Piece command together and initiate it
-  command <- paste(base, type_file, osm_file, out_file, flags) #  "--proj.plain-geo TRUE"
-  cat(paste(command, "\n"))
-  system(command)
+  netconvert_cmd <- paste(base, type_file, osm_file, out_file, flags) #  "--proj.plain-geo TRUE"
+  command(netconvert_cmd)
 
   ## If polygons provided, import them
   if (polygons) {
     base_poly <- "polyconvert"
-    net_file <- paste("--net-file", paste0(SUMO_TMP, network))
-    type_file <- paste("--type-file", paste0(SUMO_HOME, "/data/typemap/osmPolyconvert.typ.xml"))
-    out_file <- paste("-o", paste0(SUMO_TMP, "tmp.poly.xml"))
+    net_file <- paste("--net-file", literal(paste0(config$SUMO_TMP, network)))
+    type_file <- paste("--type-file", literal(paste0(config$SUMO_HOME, "/data/typemap/osmPolyconvert.typ.xml")))
+    out_file <- paste("-o", literal(paste0(config$SUMO_TMP, "tmp.poly.xml")))
     poly_command <- paste(base_poly, net_file, osm_file, type_file, out_file)
-    cat(paste(poly_command, "\n"))
-    system(poly_command)
+    command(poly_command)
     config$polygon <<- TRUE
   }
 
-  sumo_net <- read_xml(paste0(SUMO_TMP, network))
+  sumo_net <- read_xml(x = paste0(config$SUMO_TMP, network))
   config$location <<- attributes(xml2::as_list(xml_find_first(sumo_net, "//location")))
   config$CRS <<- CRS(config$location[["projParameter"]])
   config$bbox <<- sp::bbox(matrix(as.numeric(unlist(strsplit(config$location$origBoundary, ","))), nrow=2, byrow = T))
@@ -453,88 +551,71 @@ sumo$methods(addPolys = function(poly_file = "tmp.poly.xml", buildings_only=F, i
 #' @title plot
 #' @name plot
 #' @description Converts an OSM map to a SUMO road network suitable for simulation.
-sumo$methods(plot = function(x = NULL, add = F, type = "leaflet", src = c("arcgis", "leaflet", "osm")) {
+sumo$methods(plotOSM = function(x = NULL, add = F, type = "leaflet", src = c("arcgis", "leaflet", "osm")) {
   if (missing(src) || src == "arcgis")
     template <- "http://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
   map <- leaflet() %>%
       setView(lng = apply(config$bbox, 1, mean)[[1]], lat = apply(config$bbox, 1, mean)[[2]], zoom = 16)
 })
 
-#' @title getEdges
-#' @name getEdges
-#' @description Converts an OSM map to a SUMO road network suitable for simulation.
-sumo$methods(getEdges = function(internal=F, nested =F) {
-  tmp_net_file <- paste0(config$SUMO_TMP, network)
-  xpath <- ifelse(internal, "edge", "edge[@from]")
-  edges <- xml2::xml_find_all(xml2::read_xml(tmp_net_file), xpath)
-  if (nested){
-    ## todo
-    res <- xml2::as_list(xml2::xml_find_all(xml2::read_xml(tmp_net_file), xpath))
-  } else {
-    edge_xml <- xml2::xml_attrs(xml2::xml_find_all(xml2::read_xml(tmp_net_file), xpath))
-    return(data.table::rbindlist(lapply(edge_xml, as.list), fill = T))
+#' @title randomTrips2
+#' @name randomTrips2
+#' @description Uses a SUMO road network to generate road traffics
+sumo$methods(randomTrips2 = function(start=0, end=3600, lambda = 1, unit = "second", person = F){
+
+  ## SUMO-RandomTrips generates routes and trips
+  cat("Running Road Traffic Simulation...\n")
+  SUMO_TMP <- config$SUMO_TMP
+  xml_net <- xml2::read_xml(paste0(SUMO_TMP, network))
+
+  ## Generate trips
+  trip_file <- xml2::xml_new_document()
+  xml2::xml_add_child(xml2::read_xml("<routes xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:noNamespaceSchemaLocation=\"http://sumo.dlr.de/xsd/routes_file.xsd\">"))
+
+  ## Get junction data
+  junctions <- xml2::xml_find_all(xml_net, xpath = "//junction")
+  int_junctions <- Filter(junctions, f = function(junc) junc$type == "internal")
+
+  ## Generate number of arrivals at each time unit ahead of time
+  n_arrivals <- rpois(end - start, lambda = lambda)
+  ##
+
+  ## Calculate "fringe-factor"
+  geo_center <- apply(osu_net$config$bbox, 1, mean)
+  n_constant <- dist(rbind(geo_center, osu_net$config$bbox[, 1]))
+
+  ## Get junction (x, y) coordinates + distance to center
+  junc_xy <- lapply(xml2::xml_attrs(junctions), function(j) as.list(j[c("x", "y")]))
+  junc_xy <- data.table::rbindlist(junc_xy)[, .(x=as.numeric(x), y=as.numeric(y))]
+  junc_dist <- sapply(1:nrow(junc_xy), function(i) dist(rbind(as.numeric(junc_xy[i,]), geo_center)))
+  junc_dist/sum(n_constant)
+
+  ## Get the distribution of how often each junction should be picked (uniformly prefer junctions on the fringe)
+  junc_prob <- junc_dist/sum(junc_dist)
+
+  ## Generate random origin and destinations
+  origins <- sapply(n_arrivals, function(n_arrivals) sample(x = 1:nrow(junc_xy), size = n_arrivals, prob = junc_prob, replace = T))
+  destinations <- sapply(n_arrivals, function(n_arrivals) sample(x = 1:nrow(junc_xy), size = n_arrivals, prob = junc_prob, replace = T))
+
+  route_file <- xml2::xml_new_document()
+  base <- "sumo-randomTrips"
+  net_inp <- paste0("-n ", SUMO_TMP, network)
+  route_inp <- paste0("-r ", SUMO_TMP, "tmp.rou.xml")
+  trip_inp <- paste0("-o ", SUMO_TMP, "tmp.trips.xml")
+  time_inp <- paste0("-s ", start, " -e ", end)
+  type_inp <- paste0("-p ", p, " -l --binomial=", n)
+
+  ## Assemble command and simulate
+  command <- paste(base, net_inp, route_inp, trip_inp, time_inp, type_inp)
+  if (person) command <- paste(command, "--pedestrians")
+  cat("Running command: ")
+  cat(command)
+  # config$sim_status <- system(command)
+  if (config$sim_status == 0){
+    config$trips <<- paste0(SUMO_TMP, "tmp.trips.xml")
+    config$routes <<- paste0(SUMO_TMP, "tmp.rou.xml")
   }
 })
-
-
-#' #' @title randomTrips2
-#' #' @name randomTrips2
-#' #' @description Uses a SUMO road network to generate road traffics
-#' sumo$methods(randomTrips2 = function(start=0, end=3600, lambda = 1, unit = "second", person = F){
-#'
-#'   ## SUMO-RandomTrips generates routes and trips
-#'   cat("Running Road Traffic Simulation...\n")
-#'   SUMO_TMP <- config$SUMO_TMP
-#'   xml_net <- xml2::read_xml(paste0(SUMO_TMP, network))
-#'
-#'   ## Generate trips
-#'   trip_file <- xml2::xml_new_document()
-#'   xml2::xml_add_child(xml2::read_xml("<routes xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:noNamespaceSchemaLocation=\"http://sumo.dlr.de/xsd/routes_file.xsd\">"))
-#'
-#'   ## Get junction data
-#'   junctions <- xml2::xml_find_all(xml_net, xpath = "//junction")
-#'   int_junctions <- Filter(junctions, f = function(junc) junc$type == "internal")
-#'
-#'   ## Generate number of arrivals at each time unit ahead of time
-#'   n_arrivals <- rpois(end - start, lambda = lambda)
-#'   ##
-#'
-#'   ## Calculate "fringe-factor"
-#'   geo_center <- apply(osu_net$config$bbox, 1, mean)
-#'   n_constant <- dist(rbind(geo_center, osu_net$config$bbox[, 1]))
-#'
-#'   ## Get junction (x, y) coordinates + distance to center
-#'   junc_xy <- lapply(xml2::xml_attrs(junctions), function(j) as.list(j[c("x", "y")]))
-#'   junc_xy <- data.table::rbindlist(junc_xy)[, .(x=as.numeric(x), y=as.numeric(y))]
-#'   junc_dist <- sapply(1:nrow(junc_xy), function(i) dist(rbind(as.numeric(junc_xy[i,]), geo_center)))
-#'   junc_dist/sum(n_constant)
-#'
-#'   ## Get the distribution of how often each junction should be picked (uniformly prefer junctions on the fringe)
-#'   junc_prob <- junc_dist/sum(junc_dist)
-#'
-#'   ## Generate random origin and destinations
-#'   origins <- sapply(n_arrivals, function(n_arrivals) sample(x = 1:nrow(junc_xy), size = n_arrivals, prob = junc_prob, replace = T))
-#'   destinations <- sapply(n_arrivals, function(n_arrivals) sample(x = 1:nrow(junc_xy), size = n_arrivals, prob = junc_prob, replace = T))
-#'
-#'   route_file <- xml2::xml_new_document()
-#'   base <- "sumo-randomTrips"
-#'   net_inp <- paste0("-n ", SUMO_TMP, network)
-#'   route_inp <- paste0("-r ", SUMO_TMP, "tmp.rou.xml")
-#'   trip_inp <- paste0("-o ", SUMO_TMP, "tmp.trips.xml")
-#'   time_inp <- paste0("-s ", start, " -e ", end)
-#'   type_inp <- paste0("-p ", p, " -l --binomial=", n)
-#'
-#'   ## Assemble command and simulate
-#'   command <- paste(base, net_inp, route_inp, trip_inp, time_inp, type_inp)
-#'   if (person) command <- paste(command, "--pedestrians")
-#'   cat("Running command: ")
-#'   cat(command)
-#'   config$sim_status <- system(command)
-#'   if (config$sim_status == 0){
-#'     trips <- paste0(SUMO_TMP, "tmp.trips.xml")
-#'     routes <- paste0(SUMO_TMP, "tmp.rou.xml")
-#'   }
-#' })
 
 #' @title simulate
 #' @name simulate
@@ -549,7 +630,7 @@ sumo$methods(randomTrips = function(start=0, end=3600, p = 1, n=1, person = F, o
   route_inp <- paste0("-r ", SUMO_TMP, "tmp.rou.xml")
   trip_inp <- paste0("-o ", SUMO_TMP, output)
   time_inp <- paste0("-s ", start, " -e ", end)
-  type_inp <- paste0("-p ", p, " -l --binomial=", n)
+  type_inp <- paste0(" -l --binomial=", n, " --period=", p)
 
   ## Assemble command and simulate
   command <- paste(base, net_inp, route_inp, trip_inp, time_inp, type_inp)
@@ -572,9 +653,9 @@ sumo$methods(randomTrips = function(start=0, end=3600, p = 1, n=1, person = F, o
 #' @description Retrieves a map from OpenStreetMap to use for SUMO simulation
 sumo$methods(viewSimulation = function(net_file = "tmp.net.xml", route_file = "tmp.rou.xml", flags=""){
   ## Open GUI for viewing simulation
-  command <- paste0("sumo-gui -n ", config$SUMO_TMP, net_file, " -r ", config$SUMO_TMP, route_file, " ", flags)
-  if (config$polygon){ command <- paste0(command, " -a ", config$SUMO_TMP, "tmp.poly.xml") }
-  system(command)
+  sumo_gui_cmd <- paste0("sumo-gui -n ", config$SUMO_TMP, net_file, " -r ", config$SUMO_TMP, route_file, " ", flags)
+  if (config$polygon){ sumo_gui_cmd <- paste0(sumo_gui_cmd, " -a ", config$SUMO_TMP, "tmp.poly.xml") }
+  command(sumo_gui_cmd)
 })
 
 #' @title Get OpenStreetMap source
@@ -594,6 +675,23 @@ sumo$methods(getOSM = function(bbox, file="tmp.osm", overwrite=FALSE) {
   }
 })
 
+#' @title getEdges
+#' @name getEdges
+#' @description Converts an OSM map to a SUMO road network suitable for simulation.
+sumo$methods(getEdges = function(internal=F, nested =F) {
+  tmp_net_file <- paste0(config$SUMO_TMP, network)
+  xpath <- ifelse(internal, "edge", "edge[@from]")
+  edges <- xml2::xml_find_all(xml2::read_xml(tmp_net_file), xpath)
+  if (nested){
+    ## todo
+    res <- xml2::as_list(xml2::xml_find_all(xml2::read_xml(tmp_net_file), xpath))
+  } else {
+    edge_xml <- xml2::xml_attrs(xml2::xml_find_all(xml2::read_xml(tmp_net_file), xpath))
+    return(data.table::rbindlist(lapply(edge_xml, as.list), fill = T))
+  }
+})
+
+
 #' @title Get SUMO Network
 #' @name getNetwork
 #' @description Retrieves the whole SUMO road network
@@ -611,29 +709,44 @@ sumo$methods(getNetwork = function(simplify = FALSE){
 #' @title Get SUMO Junctions
 #' @name getJunctions
 #' @description Retrieves junctions in SUMO network
-sumo$methods(getJunctions = function(simplify = FALSE){
-  sumo_net <- getNetwork()
-  if (simplify){
-    res <- as_list(xml_find_all(sumo_net, "//junction"))
-    res <- lapply(res, function(junc) append(attributes(junc), list(requests=unlist(junc))))
+sumo$methods(getJunctions = function(){
+  # current_config <- xml2::read_xml(configuration)
+  # if (missing(interval) || interval == "all"){
+  #   start <- as.integer(xml2::xml_text(xml2::xml_find_all(current_config, "time/begin/@value")))
+  # } else { start <- interval$start }
+  # if (missing(interval) || interval == "all") {
+  #   end <- as.integer(xml2::xml_text(xml2::xml_find_all(current_config, "time/begin/@value")))
+  # } else { end <- interval$end }
+
+  status <- startSumoServer()
+  if (status){
+    junctions <- getJunctions_int()
+    res <- data.frame(x = junctions$junction_xy[, 1], y = junctions$junction_xy[, 2], id=junctions$junction_id)
     return(res)
-  }
-  xml_find_all(sumo_net, "//junction")
+  } else { return(NULL) }
+
+  # sumo_net <- getNetwork()
+  # if (simplify){
+  #   res <- as_list(xml_find_all(sumo_net, "//junction"))
+  #   res <- lapply(res, function(junc) append(attributes(junc), list(requests=unlist(junc))))
+  #   return(res)
+  # }
+  # xml_find_all(sumo_net, "//junction")
 })
 
-#' @title Get SUMO Edges
-#' @name getEdges
-#' @description Retrieves edges in SUMO road network
-sumo$methods(getEdges = function(simplify = FALSE){
-  sumo_net <- getNetwork()
-  if (simplify){
-    res <- as_list(xml_find_all(sumo_net, "//edge"))
-    res <- lapply(res, function(edge) append(attributes(edge), list(lanes=attributes(edge$lane))))
-    return(res)
-  } else {
-    return(xml2::xml_find_all(sumo_net, xpath = "//edge"))
-  }
-})
+#' #' @title Get SUMO Edges
+#' #' @name getEdges
+#' #' @description Retrieves edges in SUMO road network
+#' sumo$methods(getEdges = function(simplify = FALSE){
+#'   sumo_net <- getNetwork()
+#'   if (simplify){
+#'     res <- as_list(xml_find_all(sumo_net, "//edge"))
+#'     res <- lapply(res, function(edge) append(attributes(edge), list(lanes=attributes(edge$lane))))
+#'     return(res)
+#'   } else {
+#'     return(xml2::xml_find_all(sumo_net, xpath = "//edge"))
+#'   }
+#' })
 
 #' @title Get SUMO Polygons
 #' @name getPolygons
@@ -661,10 +774,21 @@ sumo$methods(getRoutes = function(route_file = "tmp.rou.xml", simplify=FALSE){
   }
 })
 
+#' @name getVehiclePositions
+#' @title getVehiclePositions
+#' @description  Uses TRACI API to retrieve the vehicle coordinates from < start, end >
+sumo$methods(getVehiclePositions = function(start, end){
+  status <- clif_net$startSumoServer()
+  if (status){
+   return(sumor:::getVehiclePositions(start, end))
+  } else { stop("Error: There was a problem starting the SUMO simulation.") }
+})
+# @inheritSection methods Retrieves vehicle coordinates in a SUMO simulation
 
-#' @title Project coordinates defined in the SUMO network to a target Coordinate Reference System
+
+#' @title Project to Coordinate Reference System
 #' @name projectCRS
-#' @description Retrieves junctions in SUMO network
+#' @description Project coordinates defined in the SUMO network to a target Coordinate Reference System. Defaults to WGS84.
 sumo$methods(projectCRS= function(x, crs=CRS("+proj=longlat +ellps=WGS84")){
   if (!is.matrix(x)) stop("projectCRS expects an nx2 matrix of numeric points.")
   offset <- as.numeric(unlist(strsplit(config$location$netOffset, ",")))
@@ -703,13 +827,13 @@ sumo$methods(genConfig = function(begin, end, file="tmp.sumocfg"){
 
 #' @title simulate
 #' @name simulate
-#' @description Uses a SUMO road network to generate road traffics
+#' @description Uses a SUMO road network to generate road traffic
 sumo$methods(simulate = function(flags=""){
   if (is(configuration, "uninitializedField")){
     stop("SUMO configuration file not found. Has genConfig been called?")
   } else {
     cat(paste0("sumo -c ", configuration, " ", flags))
-    system(paste0("sumo -c ", configuration, " ", flags))
+    command(paste0("sumo -c ", configuration, " ", flags))
   }
 })
 
@@ -721,9 +845,9 @@ sumo$methods(vehicleProbe = function(probe = list(id="probe1", type="DEFAULT_VEH
   vTypeProbe <- XML::newXMLNode("vTypeProbe", parent = additional, attrs = probe)
   settings_files <- paste0(config$SUMO_TMP, "tmp_vehprobe_settings.xml")
   XML::saveXML(config_doc, file = settings_files)
-  command <- paste0("sumo -c ", configuration, " ", flags, " --additional-files ", settings_files)
-  cat(command)
-  status <- system(command)
+  probe_cmd <- paste0("sumo -c ", configuration, " ", flags, " --additional-files ", settings_files)
+  cat(probe_cmd)
+  status <- command(probe_cmd)
 
   if (status == 0){
     timesteps <- xml2::as_list(xml2::read_xml(probe$file))
@@ -874,11 +998,11 @@ sumo$methods(testNetwork = function(output_file = "hello.net.xml"){
   xml2::xml_add_child(edge_doc, edges)
   xml2::write_xml(edge_doc, file = paste0(config$SUMO_TMP, "hello.edge.xml"))
 
-  command <- paste0("netconvert",
+  test_cmd <- paste0("netconvert",
                    " --node-files=", paste0(config$SUMO_TMP, "hello.nod.xml"),
                    " --edge-files=", paste0(config$SUMO_TMP, "hello.edge.xml"),
                    " --output-file=", paste0(config$SUMO_TMP, output_file))
-  system(command)
+  command(test_cmd)
 })
 
 

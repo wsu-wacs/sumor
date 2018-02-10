@@ -131,7 +131,7 @@ public:
         TraCIAPI& myParent;
 
 
-    private:
+    //private:
         /// @brief invalidated copy constructor
         TraCIScopeWrapper(const TraCIScopeWrapper& src);
 
@@ -176,7 +176,7 @@ public:
         void setEffort(const std::string& edgeID, double effort, SUMOTime begin = 0, SUMOTime end = SUMOTime_MAX) const;
         void setMaxSpeed(const std::string& edgeID, double speed) const;
 
-    private:
+    //private:
         /// @brief invalidated copy constructor
         EdgeScope(const EdgeScope& src);
 
@@ -209,7 +209,7 @@ public:
         void screenshot(const std::string& viewID, const std::string& filename) const;
         void trackVehicle(const std::string& viewID, const std::string& vehID) const;
 
-    private:
+    //private:
         /// @brief invalidated copy constructor
         GUIScope(const GUIScope& src);
 
@@ -242,7 +242,7 @@ public:
         std::vector<TraCIVehicleData> getVehicleData(const std::string& loopID) const;
 
 
-    private:
+    //private:
         /// @brief invalidated copy constructor
         InductionLoopScope(const InductionLoopScope& src);
 
@@ -266,7 +266,7 @@ public:
         std::vector<std::string> getIDList() const;
         TraCIPosition getPosition(const std::string& junctionID) const;
 
-    private:
+    //private:
         /// @brief invalidated copy constructor
         JunctionScope(const JunctionScope& src);
 
@@ -317,7 +317,7 @@ public:
         void setMaxSpeed(const std::string& laneID, double speed) const;
         void setLength(const std::string& laneID, double length) const;
 
-    private:
+    //private:
         /// @brief invalidated copy constructor
         LaneScope(const LaneScope& src);
 
@@ -337,7 +337,7 @@ public:
 
         std::vector<std::string> getIDList() const;
 
-    private:
+    //private:
         /// @brief invalidated copy constructor
         LaneAreaScope(const LaneAreaScope& src);
 
@@ -361,7 +361,7 @@ public:
         std::vector<std::string> getLastStepVehicleIDs(const std::string& detID) const;
         int getLastStepHaltingNumber(const std::string& detID) const;
 
-    private:
+    //private:
         /// @brief invalidated copy constructor
         MeMeScope(const MeMeScope& src);
 
@@ -393,7 +393,7 @@ public:
         void add(const std::string& poiID, double x, double y, const TraCIColor& c, const std::string& type, int layer) const;
         void remove(const std::string& poiID, int layer = 0) const;
 
-    private:
+    //private:
         /// @brief invalidated copy constructor
         POIScope(const POIScope& src);
 
@@ -424,7 +424,7 @@ public:
         void add(const std::string& polygonID, const TraCIPositionVector& shape, const TraCIColor& c, bool fill, const std::string& type, int layer) const;
         void remove(const std::string& polygonID, int layer = 0) const;
 
-    private:
+    //private:
         /// @brief invalidated copy constructor
         PolygonScope(const PolygonScope& src);
 
@@ -450,7 +450,7 @@ public:
 
         void add(const std::string& routeID, const std::vector<std::string>& edges) const;
 
-    private:
+    //private:
         /// @brief invalidated copy constructor
         RouteScope(const RouteScope& src);
 
@@ -499,7 +499,7 @@ public:
         const SubscribedContextValues& getContextSubscriptionResults() const;
         const SubscribedValues& getContextSubscriptionResults(const std::string& objID) const;
 
-    private:
+    //private:
         /// @brief invalidated copy constructor
         SimulationScope(const SimulationScope& src);
 
@@ -535,7 +535,7 @@ public:
         void setPhaseDuration(const std::string& tlsID, int phaseDuration) const;
         void setCompleteRedYellowGreenDefinition(const std::string& tlsID, const TraCILogic& logic) const;
 
-    private:
+    //private:
         /// @brief invalidated copy constructor
         TrafficLightScope(const TrafficLightScope& src);
 
@@ -595,7 +595,7 @@ public:
         void setMaxSpeedLat(const std::string& typeID, double speed) const;
         void setLateralAlignment(const std::string& typeID, const std::string& latAlignment) const;
 
-    private:
+    //private:
         /// @brief invalidated copy constructor
         VehicleTypeScope(const VehicleTypeScope& src);
 
@@ -709,7 +709,7 @@ public:
         void setShapeClass(const std::string& vehicleID, const std::string& clazz) const;
         void setEmissionClass(const std::string& vehicleID, const std::string& clazz) const;
 
-    private:
+    //private:
         /// @brief invalidated copy constructor
         VehicleScope(const VehicleScope& src);
 
@@ -753,7 +753,7 @@ public:
         void setMinGap(const std::string& personID, double minGap) const;
         void setColor(const std::string& personID, const TraCIColor& c) const;
 
-    private:
+    //private:
         /// @brief invalidated copy constructor
         PersonScope(const PersonScope& src);
 

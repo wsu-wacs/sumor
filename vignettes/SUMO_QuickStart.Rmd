@@ -1,0 +1,36 @@
+---
+title: "SUMO Quickstart"
+author: "Matt Piekenbrock"
+output: html_notebook
+---
+
+Quick start to running a random traffic simulation using the SUMOR package
+
+```{r}
+## Load the library
+library("sumor")
+
+## Setup sumo environmental variables; SUMO_TMP can be set to save resulting files, otherwise it will be set to a default folder in the package
+Sys.setenv(SUMO_HOME="/usr/local/Cellar/sumo/0.29.0")
+
+## Import or make a sumo(R) object 
+osu_bbox <- sp::bbox(matrix(c(-83.021676,39.9933,-83.005166,40.004366), nrow = 2, byrow = TRUE))
+osu_net <- sumor::sumo$new() 
+
+## Run quick road simulation w/ default settings
+osu_net$quickSim(bbox = osu_bbox, sim_len = lubridate::dhours(0.5), p = 4, n = 1) # on average generate 1 vehicle every 4 seconds
+
+## View the simulation with this command.  
+osu_net$viewSimulation()
+
+## You can retrieve the vehicle positions between any two time points in the simulation with this command
+vehicle_wgs84 <- osu_net$getVehiclePositions(start = 0, end = lubridate::dhours(0.5))
+
+## Example plot using leaflet 
+library("leaflet")
+m <- leaflet() %>%
+  addTiles() %>%  # Add default OpenStreetMap map tiles
+  addMarkers(lng = vehicle_wgs84[, 1], lat = vehicle_wgs84[, 2],
+             clusterOptions = markerClusterOptions(showCoverageOnHover = FALSE, spiderfyOnMaxZoom = FALSE, zoomToBoundsOnClick = TRUE))
+```
+

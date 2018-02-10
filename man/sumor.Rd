@@ -8,8 +8,7 @@
 \description{
 sumor enables easy access and use of a subset of the Simulation for Urban MObility (SUMO) API.
 }
-\section{sumor functions}{
-
-Todo...
+\section{methods}{
+NA
 }
 

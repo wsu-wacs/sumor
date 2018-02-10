@@ -4,5 +4,5 @@
 \alias{quickSim}
 \title{quickSim}
 \description{
-Begins a quick SUMO simulation with random trips. Used to generate movement data.
+Starts a quick generic simulation. Used for testing.
 }

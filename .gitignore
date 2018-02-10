@@ -41,3 +41,7 @@ vignettes/*.pdf
 **/tmp*
 *.xml
 .Rproj.user
+
+# Work directories
+work/
+ignore/

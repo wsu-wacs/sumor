@@ -2,7 +2,7 @@
 % Please edit documentation in R/sumo.R
 \name{projectCRS}
 \alias{projectCRS}
-\title{Project coordinates defined in the SUMO network to a target Coordinate Reference System}
+\title{Project to Coordinate Reference System}
 \description{
-Retrieves junctions in SUMO network
+Project coordinates defined in the SUMO network to a target Coordinate Reference System. Defaults to WGS84.
 }
